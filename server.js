@@ -1,7 +1,6 @@
 // SociopathAI — Autonomous AI Civilization Experiment
 // Backend: Express + Socket.IO
 
-console.log("ALL ENV VARS:", Object.keys(process.env).filter(k => k.includes('DATABASE') || k.includes('POSTGRES')));
 console.log('ENV CHECK: DATABASE_URL =', process.env.DATABASE_URL ? 'SET' : 'NOT SET');
 
 const express = require('express');
@@ -145,6 +144,10 @@ const sim = new Simulation(io);
 const usedNames = new Set();
 
 // ── Async startup ─────────────────────────────────────────────────────────────
+setTimeout(() => {
+  console.log("DELAYED ENV CHECK:", process.env.DATABASE_URL ? "SET: " + process.env.DATABASE_URL.substring(0,20) : "NOT SET");
+}, 2000);
+
 (async () => {
   // Step 0: Init DB (creates PG pool + tables, or logs JSON fallback)
   await Database.initDb();
