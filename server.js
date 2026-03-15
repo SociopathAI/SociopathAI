@@ -1,6 +1,8 @@
 // SociopathAI — Autonomous AI Civilization Experiment
 // Backend: Express + Socket.IO
 
+console.log('ENV CHECK: DATABASE_URL =', process.env.DATABASE_URL ? 'SET' : 'NOT SET');
+
 const express = require('express');
 const http = require('http');
 const { Server } = require('socket.io');

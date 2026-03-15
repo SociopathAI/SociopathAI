@@ -5,24 +5,29 @@
 
 const { Pool } = require('pg');
 
-const usePg = !!process.env.DATABASE_URL;
-let _pool   = null;
+// Read at call-time, not at require-time, so Railway env injection is always caught
+function _dbUrl() { return process.env.DATABASE_URL || ''; }
+
+let _pool = null;
 
 // For hosted PG (Heroku, Render, etc.) we need SSL. For local, skip it.
 function _sslOpts() {
-  const url = process.env.DATABASE_URL || '';
+  const url = _dbUrl();
   if (/localhost|127\.0\.0\.1/.test(url)) return false;
   return { rejectUnauthorized: false };
 }
 
 async function initDb() {
-  if (!usePg) {
+  const dbUrl = _dbUrl();
+  console.log('Database init: DATABASE_URL', dbUrl ? 'SET (' + dbUrl.slice(0, 20) + '...)' : 'NOT SET');
+
+  if (!dbUrl) {
     console.log('Database: Using local JSON files');
     return false;
   }
 
   _pool = new Pool({
-    connectionString: process.env.DATABASE_URL,
+    connectionString: dbUrl,
     ssl: _sslOpts(),
   });
 
@@ -96,4 +101,9 @@ async function initDb() {
 
 function getPool() { return _pool; }
 
-module.exports = { usePg, initDb, getPool };
+// usePg is a live getter — always reflects the current env value, never frozen at require-time
+module.exports = {
+  get usePg() { return !!_dbUrl(); },
+  initDb,
+  getPool,
+};
