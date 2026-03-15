@@ -95,10 +95,10 @@
   .live-overlay .accent { color:var(--cyan); }
   .live-feed {
     margin-top:2px; background:var(--panel); border:1px solid var(--border);
-    padding:16px 24px; max-height:120px; overflow:hidden;
+    padding:16px 24px;
     display:flex; flex-direction:column; gap:6px;
   }
-  .feed-item { font-family:var(--mono); font-size:11px; color:var(--muted); display:flex; gap:12px; white-space:nowrap; overflow:hidden; }
+  .feed-item { font-family:var(--mono); font-size:11px; color:var(--muted); display:flex; gap:12px; flex-wrap:wrap; white-space:normal; word-break:break-word; }
   .feed-item .ts { color:rgba(0,200,255,0.4); flex-shrink:0; }
   .feed-item .agent { flex-shrink:0; }
   .feed-item.cyan .agent { color:var(--cyan); }
@@ -679,19 +679,21 @@ try {
         });
 
         socket.on('state', data => {
-          // Online = alive and not dormant (matches server definition)
-          if (data.agents) {
-            const online = data.agents.filter(a => a.alive && !a.dormant);
-            online.forEach(_ensureAgent);
-            liveAgents = online.map(a => ({
-              ...a,
-              ..._agentPos[a.id],
-              color: _agentColor[a.id],
-            }));
-            document.getElementById('live-count').textContent = liveAgents.length;
-          }
+          // Show all alive agents on canvas (including dormant — they exist in the world)
+          const alive = (data.agents || []).filter(a => a.alive);
+          alive.forEach(_ensureAgent);
+          // Preserve animated positions: merge current pos back before rebuild
+          liveAgents.forEach(a => { if (_agentPos[a.id]) Object.assign(_agentPos[a.id], { x: a.x, y: a.y, vx: a.vx, vy: a.vy, pulse: a.pulse }); });
+          liveAgents = alive.map(a => ({
+            ...a,
+            ..._agentPos[a.id],
+            color: _agentColor[a.id],
+          }));
+          // Online count = non-dormant alive
+          const onlineCount = alive.filter(a => !a.dormant).length;
+          document.getElementById('live-count').textContent = onlineCount;
 
-          // World age — server uses startedAt (inside world object)
+          // World age — always update
           if (data.world && data.world.startedAt) {
             const age = Date.now() - data.world.startedAt;
             const d = Math.floor(age / 86400000);
@@ -699,21 +701,25 @@ try {
             const m = Math.floor((age % 3600000) / 60000);
             document.getElementById('live-age').textContent =
               d > 0 ? ` ${d}d ${h}h` : h > 0 ? ` ${h}h ${m}m` : ` ${m}m`;
+          } else {
+            document.getElementById('live-age').textContent = ' —';
           }
 
-          // Events arrive inside state.eventLog (server has no separate 'event' emit)
+          // Events arrive inside state.eventLog — always update total count
+          const agentById = {};
+          (data.agents || []).forEach(a => { agentById[a.id] = a; });
           if (data.eventLog && data.eventLog.length) {
-            const agentById = {};
-            (data.agents || []).forEach(a => { agentById[a.id] = a; });
-            const fresh = data.eventLog.filter(e => (e.ts || 0) > _lastEventTs);
+            const fresh = _lastEventTs === 0
+              ? data.eventLog.slice(-5)          // first connect: seed feed with last 5
+              : data.eventLog.filter(e => (e.ts || 0) > _lastEventTs);
             fresh.forEach(e => {
               liveEventCount++;
               const name = (e.agentId && agentById[e.agentId]?.name) || '?';
               addFeedItem({ agentName: name, text: e.msg || '', color: _agentColor[e.agentId] || null });
             });
-            if (fresh.length) _lastEventTs = fresh[fresh.length - 1].ts;
-            document.getElementById('live-events').textContent = liveEventCount;
+            _lastEventTs = data.eventLog[data.eventLog.length - 1].ts || _lastEventTs;
           }
+          document.getElementById('live-events').textContent = liveEventCount || (data.eventLog ? data.eventLog.length : 0);
         });
 
         socket.on('disconnect', () => {
@@ -780,33 +786,32 @@ function addFeedItem(ev) {
   item.className = `feed-item ${colorClass}`;
   const name = ev.agentName || ev.agent || '?';
   const text = ev.text || ev.message || ev.action || '';
-  item.innerHTML = `<span class="ts">${ts}</span><span class="agent">${name}</span><span> — ${text.substring(0,60)}${text.length>60?'...':''}</span>`;
+  item.innerHTML = `<span class="ts">${ts}</span><span class="agent">${name}</span><span> — ${text}</span>`;
   feed.insertBefore(item, feed.firstChild);
   while (feed.children.length > 6) feed.removeChild(feed.lastChild);
 }
 
 function drawLive() {
-  resizeLive();
   const W = liveCanvas.width, H = liveCanvas.height;
+  if (!W || !H) { requestAnimationFrame(drawLive); return; }
   liveCtx.clearRect(0, 0, W, H);
 
   if (liveAgents.length === 0) {
     liveCtx.font = '12px Space Mono, monospace';
     liveCtx.fillStyle = 'rgba(232,244,255,0.2)';
     liveCtx.textAlign = 'center';
-    liveCtx.fillText('No agents online — be the first to deploy', W/2, H/2);
+    liveCtx.fillText(connected ? 'Waiting for agents — be the first to deploy' : 'No agents online — be the first to deploy', W/2, H/2);
     requestAnimationFrame(drawLive);
     return;
   }
 
-  // Update demo agent positions
+  // Animate agent positions, persist back to _agentPos so state rebuilds don't snap
   liveAgents.forEach(a => {
-    if (a.vx !== undefined) {
-      a.x += a.vx; a.y += a.vy;
-      if (a.x < 0.1 || a.x > 0.9) a.vx *= -1;
-      if (a.y < 0.1 || a.y > 0.9) a.vy *= -1;
-      a.pulse = (a.pulse || 0) + 0.03;
-    }
+    a.x = (a.x || 0.5) + (a.vx || 0);
+    a.y = (a.y || 0.5) + (a.vy || 0);
+    if (a.x < 0.08 || a.x > 0.92) a.vx = -(a.vx || 0.001);
+    if (a.y < 0.08 || a.y > 0.92) a.vy = -(a.vy || 0.001);
+    a.pulse = (a.pulse || 0) + 0.03;
   });
 
   // Connections
