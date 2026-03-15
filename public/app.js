@@ -1,6 +1,11 @@
 // SociopathAI — Dashboard Client v2
 // Real-time updates via Socket.IO
 
+// Preview mode: loaded inside an iframe on the landing page (?preview=true)
+// Hides all UI panels immediately so only the starmap canvas is visible.
+const _isPreview = new URLSearchParams(window.location.search).get('preview') === 'true';
+if (_isPreview) document.body.classList.add('preview-mode');
+
 const socket = io();
 let lastState        = null;
 let activeLbTab      = 'score';
@@ -3179,6 +3184,7 @@ function toggleArchiveCiv(number) {
 (function initOnboarding() {
   const overlay = document.getElementById('onboarding');
   if (!overlay) return;
+  if (_isPreview) { overlay.style.display = 'none'; return; }
 
   // Already done this session — hide overlay and try to re-identify silently
   if (sessionStorage.getItem('ob_done')) {

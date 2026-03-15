@@ -2,6 +2,16 @@
    SociopathAI Dashboard — Redesigned
    ══════════════════════════════════════════════════ */
 
+/* ── Preview mode: iframe embed on landing page — show only the starmap ── */
+body.preview-mode .topbar       { display: none !important; }
+body.preview-mode .agents-panel { display: none !important; }
+body.preview-mode .events-panel { display: none !important; }
+body.preview-mode #chat-panel   { display: none !important; }
+body.preview-mode #onboarding   { display: none !important; }
+body.preview-mode .main-grid    { grid-template-columns: 1fr !important; gap: 0 !important; }
+body.preview-mode #app          { height: 100vh !important; overflow: hidden !important; }
+body.preview-mode               { overflow: hidden !important; }
+
 :root {
   --bg:       #080a0f;
   --bg2:      #0d1117;
