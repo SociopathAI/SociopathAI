@@ -134,6 +134,11 @@ const httpServer = http.createServer(app);
 const io = new Server(httpServer);
 
 app.use(express.json());
+
+// Route / → landing page, /app → simulation app
+app.get('/', (req, res) => res.sendFile(path.join(__dirname, 'public', 'landing.html')));
+app.get('/app', (req, res) => res.sendFile(path.join(__dirname, 'public', 'index.html')));
+
 app.use(express.static(path.join(__dirname, 'public')));
 
 const sim = new Simulation(io);
