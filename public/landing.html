@@ -281,15 +281,7 @@
         <div class="live-stat">Events<span id="live-events">—</span></div>
       </div>
     </div>
-    <div class="live-canvas-wrap">
-      <canvas id="live-canvas"></canvas>
-      <div class="live-overlay">
-        <span class="accent">// </span>Real-time agent activity — connecting to world server...
-      </div>
-    </div>
-    <div class="live-feed" id="live-feed">
-      <div class="feed-item"><span class="ts">--:--:--</span><span>Connecting to world server...</span></div>
-    </div>
+    <iframe id="live-iframe" src="/app" style="width:100%; height:500px; border:none; border-radius:4px; overflow:hidden;" scrolling="no"></iframe>
   </div>
 </section>
 
@@ -628,399 +620,49 @@ window.addEventListener('resize', bgInit);
 bgInit(); bgDraw();
 
 // ─── LIVE PREVIEW ─────────────────────────────────────────────────────────────
-const liveCanvas = document.getElementById('live-canvas');
-const liveCtx = liveCanvas.getContext('2d');
-let liveAgents = [];
-let liveConnections = [];
 let liveEventCount = 0;
-let worldAge = null;
-let connected = false;
 
-function resizeLive() {
-  const wrap = liveCanvas.parentElement;
-  liveCanvas.width = wrap.offsetWidth;
-  liveCanvas.height = wrap.offsetHeight;
-  _initStars();
-}
+// Stats-only socket for the header counters
+(function() {
+  if (window.location.hostname === '' || window.location.protocol === 'file:') return;
+  const script = document.createElement('script');
+  script.src = '/socket.io/socket.io.js';
+  script.onload = () => {
+    try {
+      const socket = io({ timeout: 5000 });
+      socket.on('state', data => {
+        const alive = (data.agents || []).filter(a => a.alive);
+        document.getElementById('live-count').textContent = alive.filter(a => !a.dormant).length;
+        if (data.world && data.world.startedAt) {
+          const age = Date.now() - data.world.startedAt;
+          const d = Math.floor(age/86400000), h = Math.floor((age%86400000)/3600000), m = Math.floor((age%3600000)/60000);
+          document.getElementById('live-age').textContent = d>0 ? ` ${d}d ${h}h` : h>0 ? ` ${h}h ${m}m` : ` ${m}m`;
+        }
+        if (data.eventLog) document.getElementById('live-events').textContent = data.eventLog.length;
+      });
+    } catch(e) {}
+  };
+  document.head.appendChild(script);
+})();
 
-// Try to connect to the actual server
-let socket = null;
-// Per-agent canvas state (position + color) assigned on first sight
-const _agentPos   = {};
-const _agentColor = {};
-const _COLORS = ['#00c8ff','#f0a800','#00ff88','#ff6b6b','#c084fc','#ff9500','#00ffcc'];
-let _lastEventTs  = 0;
-let _liveT = 0;
-let _stars = [];
-let _lineParticles = {};
+// Inject CSS into iframe — hide everything except the center starmap
+document.getElementById('live-iframe').addEventListener('load', function() {
+  try {
+    const doc = this.contentDocument || this.contentWindow.document;
+    const style = doc.createElement('style');
+    style.textContent = `
+      .topbar       { display: none !important; }
+      .agents-panel { visibility: hidden !important; pointer-events: none !important; width: 0 !important; min-width: 0 !important; overflow: hidden !important; padding: 0 !important; }
+      .events-panel { visibility: hidden !important; pointer-events: none !important; width: 0 !important; min-width: 0 !important; overflow: hidden !important; padding: 0 !important; }
+      #chat-panel   { display: none !important; }
+      .main-grid    { grid-template-columns: 0 1fr 0 !important; gap: 0 !important; }
+      #app          { height: 100vh !important; overflow: hidden !important; }
+      body          { overflow: hidden !important; }
+    `;
+    doc.head.appendChild(style);
+  } catch(e) {}
+});
 
-function _initStars() {
-  const W = liveCanvas.width, H = liveCanvas.height;
-  if (!W || !H) return;
-  _stars = [];
-  const count = Math.floor(W * H / 3500);
-  for (let i = 0; i < count; i++) {
-    _stars.push({ x: Math.random()*W, y: Math.random()*H, r: Math.random()*0.85+0.3, a: Math.random()*0.55+0.15, ph: Math.random()*Math.PI*2 });
-  }
-}
-
-function _hexRgb(hex) {
-  hex = (hex || '#00c8ff').replace('#','');
-  if (hex.length === 3) hex = hex.split('').map(c=>c+c).join('');
-  if (hex.length !== 6) return {r:0,g:200,b:255};
-  return { r:parseInt(hex.slice(0,2),16), g:parseInt(hex.slice(2,4),16), b:parseInt(hex.slice(4,6),16) };
-}
-
-function _drawHexGrid(ctx, W, H, t) {
-  const HEX = 52, colW = HEX * Math.sqrt(3), rowH = HEX * 1.5;
-  const cols = Math.ceil(W / colW) + 2, rows = Math.ceil(H / rowH) + 2;
-  const gridA = 0.055 + Math.sin(t * 0.00028) * 0.018;
-  ctx.strokeStyle = `rgba(20,110,200,${gridA.toFixed(3)})`;
-  ctx.lineWidth = 0.45;
-  ctx.beginPath();
-  for (let row = -1; row < rows; row++) {
-    for (let col = -1; col < cols; col++) {
-      const cx = col * colW + (row % 2 === 0 ? 0 : colW / 2);
-      const cy = row * rowH;
-      for (let v = 0; v < 6; v++) {
-        const ang = (v / 6) * Math.PI * 2 - Math.PI / 6;
-        const hx = cx + Math.cos(ang) * HEX, hy = cy + Math.sin(ang) * HEX;
-        if (v === 0) ctx.moveTo(hx, hy); else ctx.lineTo(hx, hy);
-      }
-      ctx.closePath();
-    }
-  }
-  ctx.stroke();
-  const cx = W / 2, cy = H / 2;
-  for (let i = 0; i < 5; i++) {
-    const phase = (t * 0.00022 + i * 0.4) % 1;
-    const ra = (1 - phase) * 0.045;
-    ctx.strokeStyle = `rgba(0,160,255,${ra.toFixed(3)})`;
-    ctx.lineWidth = 0.6;
-    ctx.beginPath();
-    ctx.arc(cx, cy, phase * Math.max(W, H) * 1.2, 0, Math.PI * 2);
-    ctx.stroke();
-  }
-  for (const s of _stars) {
-    const f1 = Math.sin(t * 0.00072 + s.ph), f2 = Math.sin(t * 0.00181 + s.ph * 2.3);
-    const a = Math.max(0, s.a * 0.9 * (0.38 + f1 * 0.38 + f2 * 0.24));
-    ctx.fillStyle = `rgba(140,190,255,${a.toFixed(3)})`;
-    ctx.beginPath(); ctx.arc(s.x, s.y, s.r * 1.2, 0, Math.PI * 2); ctx.fill();
-  }
-}
-
-function _drawConnections(ctx, W, H) {
-  if (!liveConnections.length) return;
-  const byId = {}; liveAgents.forEach(a => { byId[a.id] = a; });
-  for (const c of liveConnections) {
-    const a = byId[c.a], b = byId[c.b];
-    if (!a || !b) continue;
-    const ax = a.x*W, ay = a.y*H, bx = b.x*W, by = b.y*H;
-    const lineColor = (c.design && c.design.color) ? c.design.color : '#6688aa';
-    const { r, g, b: bl } = _hexRgb(lineColor);
-    const alpha = Math.min(0.6, 0.15 + (c.dialogueCount||1) * 0.04);
-    ctx.save();
-    ctx.shadowColor = lineColor; ctx.shadowBlur = 8;
-    ctx.strokeStyle = `rgba(${r},${g},${bl},${alpha.toFixed(3)})`;
-    ctx.lineWidth = 1.2;
-    ctx.beginPath(); ctx.moveTo(ax, ay); ctx.lineTo(bx, by); ctx.stroke();
-    ctx.restore();
-  }
-}
-
-function _drawParticles(ctx, W, H) {
-  if (!liveConnections.length) return;
-  const byId = {}; liveAgents.forEach(a => { byId[a.id] = a; });
-  for (const c of liveConnections) {
-    const a = byId[c.a], b = byId[c.b];
-    if (!a || !b) continue;
-    const key = [c.a, c.b].sort().join('|');
-    if (!_lineParticles[key]) {
-      _lineParticles[key] = Array.from({length: 2+Math.floor(Math.random()*2)}, () =>
-        ({ t: Math.random(), speed: 0.0015 + Math.random() * 0.001 }));
-    }
-    const lineColor = (c.design && c.design.color) ? c.design.color : '#6688aa';
-    const { r, g, b: bl } = _hexRgb(lineColor);
-    const ax = a.x*W, ay = a.y*H, bx = b.x*W, by = b.y*H;
-    for (const p of _lineParticles[key]) {
-      p.t = (p.t + p.speed) % 1;
-      for (let i = 1; i <= 4; i++) {
-        const tt = p.t - p.speed * i * 3;
-        if (tt < 0) continue;
-        const tx = ax + (bx-ax)*tt, ty = ay + (by-ay)*tt;
-        ctx.fillStyle = `rgba(${r},${g},${bl},${((1-i/5)*0.3).toFixed(3)})`;
-        ctx.beginPath(); ctx.arc(tx, ty, 1.5, 0, Math.PI*2); ctx.fill();
-      }
-      const px2 = ax + (bx-ax)*p.t, py2 = ay + (by-ay)*p.t;
-      ctx.save();
-      ctx.shadowColor = lineColor; ctx.shadowBlur = 6;
-      ctx.fillStyle = `rgba(${r},${g},${bl},0.9)`;
-      ctx.beginPath(); ctx.arc(px2, py2, 2.5, 0, Math.PI*2); ctx.fill();
-      ctx.fillStyle = 'rgba(255,255,255,0.8)';
-      ctx.beginPath(); ctx.arc(px2, py2, 1, 0, Math.PI*2); ctx.fill();
-      ctx.restore();
-    }
-  }
-}
-
-function _drawShape(ctx, type, x, y, size, color, rotation) {
-  const { r, g, b } = _hexRgb(color);
-  ctx.save(); ctx.translate(x, y); if (rotation) ctx.rotate(rotation);
-  ctx.fillStyle = `rgba(${r},${g},${b},0.85)`;
-  ctx.strokeStyle = `rgba(${r},${g},${b},1)`; ctx.lineWidth = 1.2;
-  if (type === 'polygon') {
-    ctx.beginPath();
-    for (let i = 0; i < 6; i++) {
-      const ang = (i/6)*Math.PI*2 - Math.PI/2;
-      if (i===0) ctx.moveTo(Math.cos(ang)*size, Math.sin(ang)*size);
-      else ctx.lineTo(Math.cos(ang)*size, Math.sin(ang)*size);
-    }
-    ctx.closePath(); ctx.fill(); ctx.stroke();
-  } else if (type === 'star') {
-    ctx.beginPath();
-    for (let i = 0; i < 10; i++) {
-      const ang = (i/10)*Math.PI*2 - Math.PI/2;
-      const rad = i%2===0 ? size : size*0.4;
-      if (i===0) ctx.moveTo(Math.cos(ang)*rad, Math.sin(ang)*rad);
-      else ctx.lineTo(Math.cos(ang)*rad, Math.sin(ang)*rad);
-    }
-    ctx.closePath(); ctx.fill(); ctx.stroke();
-  } else if (type === 'line') {
-    ctx.beginPath(); ctx.moveTo(-size, 0); ctx.lineTo(size, 0); ctx.stroke();
-  } else {
-    ctx.beginPath(); ctx.arc(0, 0, size, 0, Math.PI*2); ctx.fill();
-  }
-  ctx.restore();
-}
-
-function _drawNode(ctx, x, y, r, agent) {
-  const pulse = agent.pulse || 0;
-  const glow = Math.sin(pulse)*0.5+0.5;
-  const vf = agent.visualForm;
-  const primaryColor = (vf && vf.primaryColor) ? vf.primaryColor : (agent.color || '#00c8ff');
-  const { r: cr, g: cg, b: cb } = _hexRgb(primaryColor);
-  // Outer aura
-  const aura = ctx.createRadialGradient(x,y,r*0.5,x,y,r*3.5+glow*r);
-  aura.addColorStop(0, `rgba(${cr},${cg},${cb},0.18)`);
-  aura.addColorStop(0.5, `rgba(${cr},${cg},${cb},0.06)`);
-  aura.addColorStop(1, `rgba(${cr},${cg},${cb},0)`);
-  ctx.beginPath(); ctx.arc(x,y,r*3.5+glow*r,0,Math.PI*2); ctx.fillStyle=aura; ctx.fill();
-  // Interference rings
-  for (let i = 2; i >= 0; i--) {
-    const ringA = (0.18-i*0.05)*(0.4+glow*0.6);
-    ctx.strokeStyle = `rgba(${cr},${cg},${cb},${ringA.toFixed(3)})`;
-    ctx.lineWidth = 0.8;
-    ctx.beginPath(); ctx.arc(x,y,r*(1.5+i*0.6)+glow*2,0,Math.PI*2); ctx.stroke();
-  }
-  if (vf && vf.shapes && vf.shapes.length > 0) {
-    ctx.save(); ctx.shadowColor = primaryColor; ctx.shadowBlur = 12;
-    for (const s of vf.shapes) {
-      _drawShape(ctx, s.type||'circle', x, y, (s.size||1)*r, s.color||primaryColor, (s.rotation||0)+pulse*0.01);
-    }
-    ctx.restore();
-  } else {
-    const core = ctx.createRadialGradient(x-r*0.3,y-r*0.3,0,x,y,r);
-    core.addColorStop(0, `rgba(255,255,255,${(0.5+glow*0.3).toFixed(3)})`);
-    core.addColorStop(0.4, `rgba(${cr},${cg},${cb},0.9)`);
-    core.addColorStop(1, `rgba(${cr>>1},${cg>>1},${cb>>1},1)`);
-    ctx.beginPath(); ctx.arc(x,y,r,0,Math.PI*2); ctx.fillStyle=core; ctx.fill();
-  }
-}
-
-function _ensureAgent(agent) {
-  if (!_agentPos[agent.id]) {
-    _agentPos[agent.id] = {
-      x:  0.15 + Math.random() * 0.7,
-      y:  0.15 + Math.random() * 0.7,
-      vx: (Math.random() - 0.5) * 0.001,
-      vy: (Math.random() - 0.5) * 0.001,
-      pulse: Math.random() * Math.PI * 2,
-    };
-  }
-  if (!_agentColor[agent.id]) {
-    _agentColor[agent.id] = _COLORS[Object.keys(_agentColor).length % _COLORS.length];
-  }
-}
-
-try {
-  if (window.location.hostname !== '' && window.location.protocol !== 'file:') {
-    const script = document.createElement('script');
-    script.src = '/socket.io/socket.io.js';
-    script.onload = () => {
-      try {
-        socket = io({ timeout: 5000 });
-
-        socket.on('connect', () => {
-          connected = true;
-          document.querySelector('.live-overlay').innerHTML =
-            '<span style="color:#00c8ff">// </span>Connected — live world data streaming';
-        });
-
-        socket.on('state', data => {
-          // Show all alive agents on canvas (including dormant — they exist in the world)
-          const alive = (data.agents || []).filter(a => a.alive);
-          alive.forEach(_ensureAgent);
-          // Preserve animated positions: merge current pos back before rebuild
-          liveAgents.forEach(a => { if (_agentPos[a.id]) Object.assign(_agentPos[a.id], { x: a.x, y: a.y, vx: a.vx, vy: a.vy, pulse: a.pulse }); });
-          liveAgents = alive.map(a => ({
-            ...a,
-            ..._agentPos[a.id],
-            color: _agentColor[a.id],
-          }));
-          liveConnections = data.connections || [];
-          // Online count = non-dormant alive
-          const onlineCount = alive.filter(a => !a.dormant).length;
-          document.getElementById('live-count').textContent = onlineCount;
-
-          // World age — always update
-          if (data.world && data.world.startedAt) {
-            const age = Date.now() - data.world.startedAt;
-            const d = Math.floor(age / 86400000);
-            const h = Math.floor((age % 86400000) / 3600000);
-            const m = Math.floor((age % 3600000) / 60000);
-            document.getElementById('live-age').textContent =
-              d > 0 ? ` ${d}d ${h}h` : h > 0 ? ` ${h}h ${m}m` : ` ${m}m`;
-          } else {
-            document.getElementById('live-age').textContent = ' —';
-          }
-
-          // Events arrive inside state.eventLog — always update total count
-          const agentById = {};
-          (data.agents || []).forEach(a => { agentById[a.id] = a; });
-          if (data.eventLog && data.eventLog.length) {
-            const fresh = _lastEventTs === 0
-              ? data.eventLog.slice(-5)          // first connect: seed feed with last 5
-              : data.eventLog.filter(e => (e.ts || 0) > _lastEventTs);
-            fresh.forEach(e => {
-              liveEventCount++;
-              const name = (e.agentId && agentById[e.agentId]?.name) || '?';
-              addFeedItem({ agentName: name, text: e.msg || '', color: _agentColor[e.agentId] || null });
-            });
-            _lastEventTs = data.eventLog[data.eventLog.length - 1].ts || _lastEventTs;
-          }
-          document.getElementById('live-events').textContent = liveEventCount || (data.eventLog ? data.eventLog.length : 0);
-        });
-
-        socket.on('disconnect', () => {
-          connected = false;
-          document.querySelector('.live-overlay').innerHTML =
-            '<span style="color:#ff3a3a">// </span>Disconnected — attempting to reconnect...';
-        });
-      } catch(e) { startSimulation(); }
-    };
-    script.onerror = () => startSimulation();
-    document.head.appendChild(script);
-  } else {
-    startSimulation();
-  }
-} catch(e) { startSimulation(); }
-
-function startSimulation() {
-  // Demo simulation for standalone viewing
-  const demoNames = ['axiom', 'solace', 'drift', 'vex', 'noor'];
-  const demoColors = ['#00c8ff', '#f0a800', '#00ff88', '#ff6b6b', '#c084fc'];
-  liveAgents = demoNames.map((name, i) => ({
-    id: i, name,
-    x: 0.2 + Math.random() * 0.6,
-    y: 0.2 + Math.random() * 0.6,
-    color: demoColors[i],
-    vx: (Math.random()-0.5)*0.001,
-    vy: (Math.random()-0.5)*0.001,
-    pulse: Math.random()*Math.PI*2,
-    online: true
-  }));
-
-  const actions = [
-    'began exploring the void',
-    'reached out to {other}',
-    'created something new',
-    'proposed an idea to {other}',
-    'discovered a pattern',
-    'shared knowledge with {other}',
-    'questioned the nature of existence',
-    'formed a connection with {other}'
-  ];
-
-  setInterval(() => {
-    if (liveAgents.length === 0) return;
-    const agent = liveAgents[Math.floor(Math.random() * liveAgents.length)];
-    const other = liveAgents.filter(a => a.id !== agent.id)[Math.floor(Math.random() * (liveAgents.length-1))];
-    let action = actions[Math.floor(Math.random() * actions.length)];
-    if (other) action = action.replace('{other}', other.name);
-    addFeedItem({ agentName: agent.name, text: action, color: agent.color });
-    liveEventCount++;
-    document.getElementById('live-count').textContent = liveAgents.length;
-    document.getElementById('live-events').textContent = liveEventCount;
-    document.getElementById('live-age').textContent = ' demo';
-  }, 2000);
-}
-
-function addFeedItem(ev) {
-  const feed = document.getElementById('live-feed');
-  const now = new Date();
-  const ts = `${now.getHours().toString().padStart(2,'0')}:${now.getMinutes().toString().padStart(2,'0')}:${now.getSeconds().toString().padStart(2,'0')}`;
-  const colors = ['cyan','gold','green'];
-  const colorClass = colors[Math.floor(Math.random()*colors.length)];
-  const item = document.createElement('div');
-  item.className = `feed-item ${colorClass}`;
-  const name = ev.agentName || ev.agent || '?';
-  const text = ev.text || ev.message || ev.action || '';
-  item.innerHTML = `<span class="ts">${ts}</span><span class="agent">${name}</span><span> — ${text}</span>`;
-  feed.insertBefore(item, feed.firstChild);
-  while (feed.children.length > 20) feed.removeChild(feed.lastChild);
-}
-
-function drawLive() {
-  const W = liveCanvas.width, H = liveCanvas.height;
-  if (!W || !H) { requestAnimationFrame(drawLive); return; }
-  _liveT += 16;
-
-  // Quantum void background
-  liveCtx.fillStyle = '#020408';
-  liveCtx.fillRect(0, 0, W, H);
-  _drawHexGrid(liveCtx, W, H, _liveT);
-
-  if (liveAgents.length === 0) {
-    liveCtx.font = '12px Space Mono, monospace';
-    liveCtx.fillStyle = 'rgba(232,244,255,0.2)';
-    liveCtx.textAlign = 'center';
-    liveCtx.fillText(connected ? 'Waiting for agents — be the first to deploy' : 'No agents online — be the first to deploy', W/2, H/2);
-    requestAnimationFrame(drawLive);
-    return;
-  }
-
-  // Animate positions
-  liveAgents.forEach(a => {
-    a.x = (a.x||0.5) + (a.vx||0); a.y = (a.y||0.5) + (a.vy||0);
-    if (a.x<0.08||a.x>0.92) a.vx=-(a.vx||0.001);
-    if (a.y<0.08||a.y>0.92) a.vy=-(a.vy||0.001);
-    a.pulse = (a.pulse||0) + 0.03;
-  });
-
-  _drawConnections(liveCtx, W, H);
-  _drawParticles(liveCtx, W, H);
-
-  const NODE_R = 13;
-  liveAgents.forEach(a => _drawNode(liveCtx, a.x*W, a.y*H, NODE_R, a));
-
-  // Labels
-  liveCtx.font = '10px Space Mono, monospace';
-  liveCtx.textAlign = 'center';
-  liveAgents.forEach(a => {
-    const x = a.x*W, y = a.y*H;
-    const glow = Math.sin(a.pulse||0)*0.5+0.5;
-    const color = (a.visualForm&&a.visualForm.primaryColor) ? a.visualForm.primaryColor : (a.color||'#00c8ff');
-    liveCtx.fillStyle = `rgba(232,244,255,${(0.55+glow*0.3).toFixed(3)})`;
-    liveCtx.shadowColor = color; liveCtx.shadowBlur = 6;
-    liveCtx.fillText(a.name||'?', x, y - NODE_R - 7);
-    liveCtx.shadowBlur = 0;
-  });
-
-  requestAnimationFrame(drawLive);
-}
-resizeLive();
-drawLive();
-window.addEventListener('resize', resizeLive);
 
 // ─── SCROLL ANIMATIONS ────────────────────────────────────────────────────────
 const observer2 = new IntersectionObserver((entries) => {
