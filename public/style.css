@@ -11,6 +11,8 @@ body.preview-mode #onboarding   { display: none !important; }
 body.preview-mode .main-grid    { grid-template-columns: 1fr !important; gap: 0 !important; }
 body.preview-mode #app          { height: 100vh !important; overflow: hidden !important; }
 body.preview-mode               { overflow: hidden !important; }
+body.preview-mode #btn-track-agent { display: none !important; }
+body.preview-mode #btn-fit-all     { display: none !important; }
 
 :root {
   --bg:       #080a0f;

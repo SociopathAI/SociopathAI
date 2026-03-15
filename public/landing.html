@@ -680,27 +680,43 @@ let liveEventCount = 0;
   document.head.appendChild(script);
 })();
 
+// Event type → text color
+function _eventTypeColor(type) {
+  if (!type) return 'rgba(232,244,255,0.4)';
+  if (type === 'join')                                    return '#00ff88';
+  if (type === 'dialogue' || type === 'speech' || type === 'intro') return '#00c8ff';
+  if (type === 'system'   || type === 'death')            return '#c084fc';
+  return 'rgba(232,244,255,0.4)';
+}
+
 function _addFeedItem(entry, agentsById) {
   const feed = document.getElementById('live-feed');
   if (!feed) return;
-  const d = new Date(entry.ts || Date.now());
+  const d  = new Date(entry.ts || Date.now());
   const ts = `${d.getHours().toString().padStart(2,'0')}:${d.getMinutes().toString().padStart(2,'0')}:${d.getSeconds().toString().padStart(2,'0')}`;
-  const agent = entry.agentId ? agentsById[entry.agentId] : null;
-  const name  = agent ? agent.name : null;
-  const text  = entry.msg || '';
-  const item  = document.createElement('div');
-  item.className = 'lf-item';
-  item.innerHTML = name
-    ? `<span class="lf-ts">${ts}</span><span class="lf-agent" style="color:${_agentColorFor(entry.agentId)}">${name}</span><span class="lf-text"> — ${text}</span>`
-    : `<span class="lf-ts">${ts}</span><span class="lf-text">${text}</span>`;
+  const agent     = entry.agentId ? agentsById[entry.agentId] : null;
+  const name      = agent ? agent.name : null;
+  const nameColor = agent ? _agentColorFor(agent) : null;
+  const textColor = _eventTypeColor(entry.type);
+  const text      = entry.msg || '';
+  const item      = document.createElement('div');
+  item.className  = 'lf-item';
+  item.innerHTML  = name
+    ? `<span class="lf-ts">${ts}</span><span class="lf-agent" style="color:${nameColor}">${name}</span><span class="lf-text" style="color:${textColor}"> — ${text}</span>`
+    : `<span class="lf-ts">${ts}</span><span class="lf-text" style="color:${textColor}">${text}</span>`;
   feed.insertBefore(item, feed.firstChild);
   while (feed.children.length > 20) feed.removeChild(feed.lastChild);
 }
 
-const _feedColors = ['#00c8ff','#f0a800','#00ff88','#ff6b6b','#c084fc','#ff9500','#00ffcc'];
+const _feedColors  = ['#00c8ff','#f0a800','#00ff88','#ff6b6b','#c084fc','#ff9500','#00ffcc'];
 const _feedColorMap = {};
-function _agentColorFor(id) {
-  if (!id) return 'var(--muted)';
+function _agentColorFor(agent) {
+  if (!agent) return 'rgba(232,244,255,0.4)';
+  // Prefer LLM-assigned primary color
+  const primary = agent.visualForm && agent.visualForm.primaryColor;
+  if (primary) return primary;
+  // Fallback: stable per-id palette color
+  const id = agent.id;
   if (!_feedColorMap[id]) _feedColorMap[id] = _feedColors[Object.keys(_feedColorMap).length % _feedColors.length];
   return _feedColorMap[id];
 }
