@@ -19,8 +19,6 @@ function _sslOpts() {
 
 async function initDb() {
   const dbUrl = _dbUrl();
-  console.log('Database init: DATABASE_URL', dbUrl ? 'SET (' + dbUrl.slice(0, 20) + '...)' : 'NOT SET');
-
   if (!dbUrl) {
     console.log('Database: Using local JSON files');
     return false;
