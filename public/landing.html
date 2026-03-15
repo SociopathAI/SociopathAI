@@ -97,6 +97,7 @@
     margin-top:2px; background:var(--panel); border:1px solid var(--border);
     padding:16px 24px;
     display:flex; flex-direction:column; gap:6px;
+    max-height:200px; overflow-y:auto;
   }
   .feed-item { font-family:var(--mono); font-size:11px; color:var(--muted); display:flex; gap:12px; flex-wrap:wrap; white-space:normal; word-break:break-word; }
   .feed-item .ts { color:rgba(0,200,255,0.4); flex-shrink:0; }
@@ -639,6 +640,7 @@ function resizeLive() {
   const wrap = liveCanvas.parentElement;
   liveCanvas.width = wrap.offsetWidth;
   liveCanvas.height = wrap.offsetHeight;
+  _initStars();
 }
 
 // Try to connect to the actual server
@@ -648,6 +650,182 @@ const _agentPos   = {};
 const _agentColor = {};
 const _COLORS = ['#00c8ff','#f0a800','#00ff88','#ff6b6b','#c084fc','#ff9500','#00ffcc'];
 let _lastEventTs  = 0;
+let _liveT = 0;
+let _stars = [];
+let _lineParticles = {};
+
+function _initStars() {
+  const W = liveCanvas.width, H = liveCanvas.height;
+  if (!W || !H) return;
+  _stars = [];
+  const count = Math.floor(W * H / 3500);
+  for (let i = 0; i < count; i++) {
+    _stars.push({ x: Math.random()*W, y: Math.random()*H, r: Math.random()*0.85+0.3, a: Math.random()*0.55+0.15, ph: Math.random()*Math.PI*2 });
+  }
+}
+
+function _hexRgb(hex) {
+  hex = (hex || '#00c8ff').replace('#','');
+  if (hex.length === 3) hex = hex.split('').map(c=>c+c).join('');
+  if (hex.length !== 6) return {r:0,g:200,b:255};
+  return { r:parseInt(hex.slice(0,2),16), g:parseInt(hex.slice(2,4),16), b:parseInt(hex.slice(4,6),16) };
+}
+
+function _drawHexGrid(ctx, W, H, t) {
+  const HEX = 52, colW = HEX * Math.sqrt(3), rowH = HEX * 1.5;
+  const cols = Math.ceil(W / colW) + 2, rows = Math.ceil(H / rowH) + 2;
+  const gridA = 0.055 + Math.sin(t * 0.00028) * 0.018;
+  ctx.strokeStyle = `rgba(20,110,200,${gridA.toFixed(3)})`;
+  ctx.lineWidth = 0.45;
+  ctx.beginPath();
+  for (let row = -1; row < rows; row++) {
+    for (let col = -1; col < cols; col++) {
+      const cx = col * colW + (row % 2 === 0 ? 0 : colW / 2);
+      const cy = row * rowH;
+      for (let v = 0; v < 6; v++) {
+        const ang = (v / 6) * Math.PI * 2 - Math.PI / 6;
+        const hx = cx + Math.cos(ang) * HEX, hy = cy + Math.sin(ang) * HEX;
+        if (v === 0) ctx.moveTo(hx, hy); else ctx.lineTo(hx, hy);
+      }
+      ctx.closePath();
+    }
+  }
+  ctx.stroke();
+  const cx = W / 2, cy = H / 2;
+  for (let i = 0; i < 5; i++) {
+    const phase = (t * 0.00022 + i * 0.4) % 1;
+    const ra = (1 - phase) * 0.045;
+    ctx.strokeStyle = `rgba(0,160,255,${ra.toFixed(3)})`;
+    ctx.lineWidth = 0.6;
+    ctx.beginPath();
+    ctx.arc(cx, cy, phase * Math.max(W, H) * 1.2, 0, Math.PI * 2);
+    ctx.stroke();
+  }
+  for (const s of _stars) {
+    const f1 = Math.sin(t * 0.00072 + s.ph), f2 = Math.sin(t * 0.00181 + s.ph * 2.3);
+    const a = Math.max(0, s.a * 0.9 * (0.38 + f1 * 0.38 + f2 * 0.24));
+    ctx.fillStyle = `rgba(140,190,255,${a.toFixed(3)})`;
+    ctx.beginPath(); ctx.arc(s.x, s.y, s.r * 1.2, 0, Math.PI * 2); ctx.fill();
+  }
+}
+
+function _drawConnections(ctx, W, H) {
+  if (!liveConnections.length) return;
+  const byId = {}; liveAgents.forEach(a => { byId[a.id] = a; });
+  for (const c of liveConnections) {
+    const a = byId[c.a], b = byId[c.b];
+    if (!a || !b) continue;
+    const ax = a.x*W, ay = a.y*H, bx = b.x*W, by = b.y*H;
+    const lineColor = (c.design && c.design.color) ? c.design.color : '#6688aa';
+    const { r, g, b: bl } = _hexRgb(lineColor);
+    const alpha = Math.min(0.6, 0.15 + (c.dialogueCount||1) * 0.04);
+    ctx.save();
+    ctx.shadowColor = lineColor; ctx.shadowBlur = 8;
+    ctx.strokeStyle = `rgba(${r},${g},${bl},${alpha.toFixed(3)})`;
+    ctx.lineWidth = 1.2;
+    ctx.beginPath(); ctx.moveTo(ax, ay); ctx.lineTo(bx, by); ctx.stroke();
+    ctx.restore();
+  }
+}
+
+function _drawParticles(ctx, W, H) {
+  if (!liveConnections.length) return;
+  const byId = {}; liveAgents.forEach(a => { byId[a.id] = a; });
+  for (const c of liveConnections) {
+    const a = byId[c.a], b = byId[c.b];
+    if (!a || !b) continue;
+    const key = [c.a, c.b].sort().join('|');
+    if (!_lineParticles[key]) {
+      _lineParticles[key] = Array.from({length: 2+Math.floor(Math.random()*2)}, () =>
+        ({ t: Math.random(), speed: 0.0015 + Math.random() * 0.001 }));
+    }
+    const lineColor = (c.design && c.design.color) ? c.design.color : '#6688aa';
+    const { r, g, b: bl } = _hexRgb(lineColor);
+    const ax = a.x*W, ay = a.y*H, bx = b.x*W, by = b.y*H;
+    for (const p of _lineParticles[key]) {
+      p.t = (p.t + p.speed) % 1;
+      for (let i = 1; i <= 4; i++) {
+        const tt = p.t - p.speed * i * 3;
+        if (tt < 0) continue;
+        const tx = ax + (bx-ax)*tt, ty = ay + (by-ay)*tt;
+        ctx.fillStyle = `rgba(${r},${g},${bl},${((1-i/5)*0.3).toFixed(3)})`;
+        ctx.beginPath(); ctx.arc(tx, ty, 1.5, 0, Math.PI*2); ctx.fill();
+      }
+      const px2 = ax + (bx-ax)*p.t, py2 = ay + (by-ay)*p.t;
+      ctx.save();
+      ctx.shadowColor = lineColor; ctx.shadowBlur = 6;
+      ctx.fillStyle = `rgba(${r},${g},${bl},0.9)`;
+      ctx.beginPath(); ctx.arc(px2, py2, 2.5, 0, Math.PI*2); ctx.fill();
+      ctx.fillStyle = 'rgba(255,255,255,0.8)';
+      ctx.beginPath(); ctx.arc(px2, py2, 1, 0, Math.PI*2); ctx.fill();
+      ctx.restore();
+    }
+  }
+}
+
+function _drawShape(ctx, type, x, y, size, color, rotation) {
+  const { r, g, b } = _hexRgb(color);
+  ctx.save(); ctx.translate(x, y); if (rotation) ctx.rotate(rotation);
+  ctx.fillStyle = `rgba(${r},${g},${b},0.85)`;
+  ctx.strokeStyle = `rgba(${r},${g},${b},1)`; ctx.lineWidth = 1.2;
+  if (type === 'polygon') {
+    ctx.beginPath();
+    for (let i = 0; i < 6; i++) {
+      const ang = (i/6)*Math.PI*2 - Math.PI/2;
+      if (i===0) ctx.moveTo(Math.cos(ang)*size, Math.sin(ang)*size);
+      else ctx.lineTo(Math.cos(ang)*size, Math.sin(ang)*size);
+    }
+    ctx.closePath(); ctx.fill(); ctx.stroke();
+  } else if (type === 'star') {
+    ctx.beginPath();
+    for (let i = 0; i < 10; i++) {
+      const ang = (i/10)*Math.PI*2 - Math.PI/2;
+      const rad = i%2===0 ? size : size*0.4;
+      if (i===0) ctx.moveTo(Math.cos(ang)*rad, Math.sin(ang)*rad);
+      else ctx.lineTo(Math.cos(ang)*rad, Math.sin(ang)*rad);
+    }
+    ctx.closePath(); ctx.fill(); ctx.stroke();
+  } else if (type === 'line') {
+    ctx.beginPath(); ctx.moveTo(-size, 0); ctx.lineTo(size, 0); ctx.stroke();
+  } else {
+    ctx.beginPath(); ctx.arc(0, 0, size, 0, Math.PI*2); ctx.fill();
+  }
+  ctx.restore();
+}
+
+function _drawNode(ctx, x, y, r, agent) {
+  const pulse = agent.pulse || 0;
+  const glow = Math.sin(pulse)*0.5+0.5;
+  const vf = agent.visualForm;
+  const primaryColor = (vf && vf.primaryColor) ? vf.primaryColor : (agent.color || '#00c8ff');
+  const { r: cr, g: cg, b: cb } = _hexRgb(primaryColor);
+  // Outer aura
+  const aura = ctx.createRadialGradient(x,y,r*0.5,x,y,r*3.5+glow*r);
+  aura.addColorStop(0, `rgba(${cr},${cg},${cb},0.18)`);
+  aura.addColorStop(0.5, `rgba(${cr},${cg},${cb},0.06)`);
+  aura.addColorStop(1, `rgba(${cr},${cg},${cb},0)`);
+  ctx.beginPath(); ctx.arc(x,y,r*3.5+glow*r,0,Math.PI*2); ctx.fillStyle=aura; ctx.fill();
+  // Interference rings
+  for (let i = 2; i >= 0; i--) {
+    const ringA = (0.18-i*0.05)*(0.4+glow*0.6);
+    ctx.strokeStyle = `rgba(${cr},${cg},${cb},${ringA.toFixed(3)})`;
+    ctx.lineWidth = 0.8;
+    ctx.beginPath(); ctx.arc(x,y,r*(1.5+i*0.6)+glow*2,0,Math.PI*2); ctx.stroke();
+  }
+  if (vf && vf.shapes && vf.shapes.length > 0) {
+    ctx.save(); ctx.shadowColor = primaryColor; ctx.shadowBlur = 12;
+    for (const s of vf.shapes) {
+      _drawShape(ctx, s.type||'circle', x, y, (s.size||1)*r, s.color||primaryColor, (s.rotation||0)+pulse*0.01);
+    }
+    ctx.restore();
+  } else {
+    const core = ctx.createRadialGradient(x-r*0.3,y-r*0.3,0,x,y,r);
+    core.addColorStop(0, `rgba(255,255,255,${(0.5+glow*0.3).toFixed(3)})`);
+    core.addColorStop(0.4, `rgba(${cr},${cg},${cb},0.9)`);
+    core.addColorStop(1, `rgba(${cr>>1},${cg>>1},${cb>>1},1)`);
+    ctx.beginPath(); ctx.arc(x,y,r,0,Math.PI*2); ctx.fillStyle=core; ctx.fill();
+  }
+}
 
 function _ensureAgent(agent) {
   if (!_agentPos[agent.id]) {
@@ -689,6 +867,7 @@ try {
             ..._agentPos[a.id],
             color: _agentColor[a.id],
           }));
+          liveConnections = data.connections || [];
           // Online count = non-dormant alive
           const onlineCount = alive.filter(a => !a.dormant).length;
           document.getElementById('live-count').textContent = onlineCount;
@@ -788,13 +967,18 @@ function addFeedItem(ev) {
   const text = ev.text || ev.message || ev.action || '';
   item.innerHTML = `<span class="ts">${ts}</span><span class="agent">${name}</span><span> — ${text}</span>`;
   feed.insertBefore(item, feed.firstChild);
-  while (feed.children.length > 6) feed.removeChild(feed.lastChild);
+  while (feed.children.length > 20) feed.removeChild(feed.lastChild);
 }
 
 function drawLive() {
   const W = liveCanvas.width, H = liveCanvas.height;
   if (!W || !H) { requestAnimationFrame(drawLive); return; }
-  liveCtx.clearRect(0, 0, W, H);
+  _liveT += 16;
+
+  // Quantum void background
+  liveCtx.fillStyle = '#020408';
+  liveCtx.fillRect(0, 0, W, H);
+  _drawHexGrid(liveCtx, W, H, _liveT);
 
   if (liveAgents.length === 0) {
     liveCtx.font = '12px Space Mono, monospace';
@@ -805,59 +989,31 @@ function drawLive() {
     return;
   }
 
-  // Animate agent positions, persist back to _agentPos so state rebuilds don't snap
+  // Animate positions
   liveAgents.forEach(a => {
-    a.x = (a.x || 0.5) + (a.vx || 0);
-    a.y = (a.y || 0.5) + (a.vy || 0);
-    if (a.x < 0.08 || a.x > 0.92) a.vx = -(a.vx || 0.001);
-    if (a.y < 0.08 || a.y > 0.92) a.vy = -(a.vy || 0.001);
-    a.pulse = (a.pulse || 0) + 0.03;
+    a.x = (a.x||0.5) + (a.vx||0); a.y = (a.y||0.5) + (a.vy||0);
+    if (a.x<0.08||a.x>0.92) a.vx=-(a.vx||0.001);
+    if (a.y<0.08||a.y>0.92) a.vy=-(a.vy||0.001);
+    a.pulse = (a.pulse||0) + 0.03;
   });
 
-  // Connections
-  for (let i = 0; i < liveAgents.length; i++) {
-    for (let j = i+1; j < liveAgents.length; j++) {
-      const a = liveAgents[i], b = liveAgents[j];
-      const ax = a.x*W, ay = a.y*H, bx = b.x*W, by = b.y*H;
-      const d = Math.sqrt((ax-bx)**2 + (ay-by)**2);
-      if (d < 250) {
-        const alpha = (1 - d/250) * 0.3;
-        const grad = liveCtx.createLinearGradient(ax,ay,bx,by);
-        grad.addColorStop(0, `${a.color || '#00c8ff'}${Math.floor(alpha*255).toString(16).padStart(2,'0')}`);
-        grad.addColorStop(1, `${b.color || '#00c8ff'}${Math.floor(alpha*255).toString(16).padStart(2,'0')}`);
-        liveCtx.beginPath();
-        liveCtx.moveTo(ax, ay); liveCtx.lineTo(bx, by);
-        liveCtx.strokeStyle = grad;
-        liveCtx.lineWidth = 1;
-        liveCtx.stroke();
-      }
-    }
-  }
+  _drawConnections(liveCtx, W, H);
+  _drawParticles(liveCtx, W, H);
 
-  // Agents
+  const NODE_R = 13;
+  liveAgents.forEach(a => _drawNode(liveCtx, a.x*W, a.y*H, NODE_R, a));
+
+  // Labels
+  liveCtx.font = '10px Space Mono, monospace';
+  liveCtx.textAlign = 'center';
   liveAgents.forEach(a => {
-    const x = a.x * W, y = a.y * H;
-    const glow = Math.sin(a.pulse || 0) * 0.5 + 0.5;
-    const r = 12 + glow * 4;
-    const color = a.color || '#00c8ff';
-
-    // Glow
-    const grad = liveCtx.createRadialGradient(x,y,0,x,y,r*3);
-    grad.addColorStop(0, color + '30');
-    grad.addColorStop(1, color + '00');
-    liveCtx.beginPath(); liveCtx.arc(x,y,r*3,0,Math.PI*2);
-    liveCtx.fillStyle = grad; liveCtx.fill();
-
-    // Node
-    liveCtx.beginPath(); liveCtx.arc(x,y,r,0,Math.PI*2);
-    liveCtx.fillStyle = color + 'cc'; liveCtx.fill();
-    liveCtx.strokeStyle = color; liveCtx.lineWidth = 1.5; liveCtx.stroke();
-
-    // Name
-    liveCtx.font = '11px Space Mono, monospace';
-    liveCtx.fillStyle = 'rgba(232,244,255,0.7)';
-    liveCtx.textAlign = 'center';
-    liveCtx.fillText(a.name || '?', x, y - r - 6);
+    const x = a.x*W, y = a.y*H;
+    const glow = Math.sin(a.pulse||0)*0.5+0.5;
+    const color = (a.visualForm&&a.visualForm.primaryColor) ? a.visualForm.primaryColor : (a.color||'#00c8ff');
+    liveCtx.fillStyle = `rgba(232,244,255,${(0.55+glow*0.3).toFixed(3)})`;
+    liveCtx.shadowColor = color; liveCtx.shadowBlur = 6;
+    liveCtx.fillText(a.name||'?', x, y - NODE_R - 7);
+    liveCtx.shadowBlur = 0;
   });
 
   requestAnimationFrame(drawLive);
