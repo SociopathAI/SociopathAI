@@ -1,0 +1,20 @@
+# Dependencies
+node_modules/
+
+# Data files — PERMANENT HISTORY, never commit, never clear
+# These files accumulate forever and must survive all code updates.
+# DO NOT delete, overwrite, or git-clean this directory.
+data/
+
+# Environment / secrets
+.env
+*.env
+
+# OS junk
+.DS_Store
+Thumbs.db
+
+# Editor
+.vscode/
+*.swp
+*.swo

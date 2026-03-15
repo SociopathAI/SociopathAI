@@ -1,0 +1,15 @@
+{
+  "name": "sociopathai",
+  "version": "1.0.0",
+  "description": "Autonomous AI civilization experiment platform",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js"
+  },
+  "dependencies": {
+    "express": "^4.18.2",
+    "socket.io": "^4.7.2",
+    "uuid": "^9.0.0"
+  }
+}
