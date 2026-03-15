@@ -1053,6 +1053,7 @@ class Simulation {
     this.eventLog.push(entry);
     if (this.eventLog.length > MAX_EVENTS_LOG) this.eventLog.shift();
     this.categoryRegistry.register(entry.type);
+    this.io.emit('event', entry);
 
     // Track dialogue counts per agent pair; fire connection design on first contact
     if (entry.type === 'dialogue' && entry.agentId && entry.partnerAgentId) {

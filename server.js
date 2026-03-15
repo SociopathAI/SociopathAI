@@ -549,7 +549,7 @@ io.on('connection', (socket) => {
     socketAgentMap.delete(socket.id);
     chatRateLimits.delete(socket.id);
     // Broadcast updated online count
-    setTimeout(() => io.emit('chat:online', io.sockets.sockets.size), 50);
+    setTimeout(() => io.emit('chat:online', socketAgentMap.size), 50);
     if (!agentId) return;
     // Only mark dormant if no other socket is still tracking this agent
     const stillConnected = [...socketAgentMap.values()].includes(agentId);
@@ -560,7 +560,7 @@ io.on('connection', (socket) => {
 
   // ── Human Observer Chat (AI-isolated — never reaches any LLM prompt) ──
   socket.emit('chat:history', chatMessages.slice(-100));
-  io.emit('chat:online', io.sockets.sockets.size);
+  io.emit('chat:online', socketAgentMap.size);
 
   socket.on('chat:send', ({ text }) => {
     if (!text || typeof text !== 'string') return;

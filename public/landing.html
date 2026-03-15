@@ -106,6 +106,14 @@
   .feed-item.gold .agent { color:var(--gold); }
   .feed-item.green .agent { color:var(--green); }
   .no-agents-msg { font-family:var(--mono); font-size:12px; color:var(--muted); text-align:center; padding:40px; letter-spacing:0.1em; }
+  .live-feed-wrap { margin-top:6px; border:1px solid var(--border); background:var(--panel); }
+  .live-feed-label { font-family:var(--mono); font-size:10px; letter-spacing:0.18em; text-transform:uppercase; color:var(--cyan); padding:10px 16px 8px; border-bottom:1px solid var(--border); display:flex; align-items:center; gap:8px; }
+  .live-feed-list { max-height:180px; overflow-y:auto; padding:6px 0; }
+  .lf-item { font-family:var(--mono); font-size:11px; display:flex; gap:10px; align-items:baseline; padding:3px 16px; line-height:1.5; }
+  .lf-ts { color:rgba(0,200,255,0.35); flex-shrink:0; font-size:10px; }
+  .lf-agent { flex-shrink:0; font-weight:700; }
+  .lf-text { color:var(--muted); word-break:break-word; }
+  .lf-muted .lf-text { color:rgba(232,244,255,0.2); }
 
   /* SECTION COMMON */
   .section-label { font-family:var(--mono); font-size:10px; letter-spacing:0.3em; text-transform:uppercase; color:var(--cyan); margin-bottom:24px; display:flex; align-items:center; gap:16px; }
@@ -282,6 +290,12 @@
       </div>
     </div>
     <iframe id="live-iframe" src="/app?preview=true" style="width:100%; height:500px; border:none; border-radius:4px; overflow:hidden;" scrolling="no"></iframe>
+    <div class="live-feed-wrap">
+      <div class="live-feed-label"><span class="live-dot"></span>Event Stream</div>
+      <div id="live-feed" class="live-feed-list">
+        <div class="lf-item lf-muted"><span class="lf-ts">--:--:--</span><span class="lf-text">Connecting to world server…</span></div>
+      </div>
+    </div>
   </div>
 </section>
 
@@ -622,7 +636,7 @@ bgInit(); bgDraw();
 // ─── LIVE PREVIEW ─────────────────────────────────────────────────────────────
 let liveEventCount = 0;
 
-// Stats-only socket for the header counters
+// Socket: stats header + live event feed
 (function() {
   if (window.location.hostname === '' || window.location.protocol === 'file:') return;
   const script = document.createElement('script');
@@ -630,8 +644,13 @@ let liveEventCount = 0;
   script.onload = () => {
     try {
       const socket = io({ timeout: 5000 });
+      const agentsById = {};
+
       socket.on('state', data => {
         const alive = (data.agents || []).filter(a => a.alive);
+        // Keep agent name lookup fresh
+        (data.agents || []).forEach(a => { agentsById[a.id] = a; });
+        // Stats
         document.getElementById('live-count').textContent = alive.filter(a => !a.dormant).length;
         if (data.world && data.world.startedAt) {
           const age = Date.now() - data.world.startedAt;
@@ -639,11 +658,52 @@ let liveEventCount = 0;
           document.getElementById('live-age').textContent = d>0 ? ` ${d}d ${h}h` : h>0 ? ` ${h}h ${m}m` : ` ${m}m`;
         }
         if (data.eventLog) document.getElementById('live-events').textContent = data.eventLog.length;
+        // Seed feed with last 10 events on first connect (only once)
+        if (!socket._feedSeeded && data.eventLog && data.eventLog.length) {
+          socket._feedSeeded = true;
+          const feed = document.getElementById('live-feed');
+          feed.innerHTML = '';
+          const seed = data.eventLog.slice(-10).reverse();
+          seed.forEach(e => _addFeedItem(e, agentsById));
+        }
       });
+
+      socket.on('event', entry => {
+        (entry.agents || []).forEach(a => { agentsById[a.id] = a; });
+        _addFeedItem(entry, agentsById);
+        document.getElementById('live-events').textContent =
+          parseInt(document.getElementById('live-events').textContent || '0', 10) + 1;
+      });
+
     } catch(e) {}
   };
   document.head.appendChild(script);
 })();
+
+function _addFeedItem(entry, agentsById) {
+  const feed = document.getElementById('live-feed');
+  if (!feed) return;
+  const d = new Date(entry.ts || Date.now());
+  const ts = `${d.getHours().toString().padStart(2,'0')}:${d.getMinutes().toString().padStart(2,'0')}:${d.getSeconds().toString().padStart(2,'0')}`;
+  const agent = entry.agentId ? agentsById[entry.agentId] : null;
+  const name  = agent ? agent.name : null;
+  const text  = entry.msg || '';
+  const item  = document.createElement('div');
+  item.className = 'lf-item';
+  item.innerHTML = name
+    ? `<span class="lf-ts">${ts}</span><span class="lf-agent" style="color:${_agentColorFor(entry.agentId)}">${name}</span><span class="lf-text"> — ${text}</span>`
+    : `<span class="lf-ts">${ts}</span><span class="lf-text">${text}</span>`;
+  feed.insertBefore(item, feed.firstChild);
+  while (feed.children.length > 20) feed.removeChild(feed.lastChild);
+}
+
+const _feedColors = ['#00c8ff','#f0a800','#00ff88','#ff6b6b','#c084fc','#ff9500','#00ffcc'];
+const _feedColorMap = {};
+function _agentColorFor(id) {
+  if (!id) return 'var(--muted)';
+  if (!_feedColorMap[id]) _feedColorMap[id] = _feedColors[Object.keys(_feedColorMap).length % _feedColors.length];
+  return _feedColorMap[id];
+}
 
 
 
