@@ -9,6 +9,7 @@ const fs = require('fs');
 const Simulation = require('./src/Simulation');
 const LLMBridge = require('./src/LLMBridge');
 const PersistenceManager = require('./src/PersistenceManager');
+const Database = require('./src/Database');
 
 const PORT = 3000;
 const VALID_AI_SYSTEMS = ['ChatGPT', 'Claude', 'Gemini', 'Grok', 'Groq', 'Llama', 'Mistral', 'Other'];
@@ -58,29 +59,56 @@ function chatContainsProfanity(text) {
 const chatRateLimits = new Map(); // socketId → lastSendTimestamp
 
 let chatMessages = [];
-(function loadChatHistory() {
-  try {
-    if (fs.existsSync(CHAT_FILE)) {
-      const raw    = fs.readFileSync(CHAT_FILE, 'utf8');
-      const parsed = JSON.parse(raw);
-      chatMessages = Array.isArray(parsed.messages) ? parsed.messages : [];
-      console.log(`[Chat] Loaded ${chatMessages.length} messages`);
-    }
-  } catch (e) {
-    console.warn('[Chat] Failed to load chat history:', e.message);
-    chatMessages = [];
-  }
-})();
 
-function saveChatHistory() {
-  try {
-    const dataDir = path.dirname(CHAT_FILE);
-    if (!fs.existsSync(dataDir)) fs.mkdirSync(dataDir, { recursive: true });
-    const tmp = CHAT_FILE + '.tmp';
-    fs.writeFileSync(tmp, JSON.stringify({ messages: chatMessages }));
-    fs.renameSync(tmp, CHAT_FILE);
-  } catch (e) {
-    console.warn('[Chat] Failed to save chat history:', e.message);
+async function loadChatHistory() {
+  if (Database.usePg && Database.getPool()) {
+    try {
+      const res = await Database.getPool().query(
+        'SELECT id, ts, name, ai_system AS "aiSystem", text FROM chat ORDER BY ts ASC LIMIT 500'
+      );
+      chatMessages = res.rows;
+      console.log(`[Chat] Loaded ${chatMessages.length} messages from PostgreSQL`);
+    } catch (e) {
+      console.warn('[Chat] Failed to load from PostgreSQL:', e.message);
+      chatMessages = [];
+    }
+  } else {
+    try {
+      if (fs.existsSync(CHAT_FILE)) {
+        const raw    = fs.readFileSync(CHAT_FILE, 'utf8');
+        const parsed = JSON.parse(raw);
+        chatMessages = Array.isArray(parsed.messages) ? parsed.messages : [];
+        console.log(`[Chat] Loaded ${chatMessages.length} messages`);
+      }
+    } catch (e) {
+      console.warn('[Chat] Failed to load chat history:', e.message);
+      chatMessages = [];
+    }
+  }
+}
+
+async function saveChatHistory(latestMsg) {
+  if (Database.usePg && Database.getPool()) {
+    if (!latestMsg) return;
+    try {
+      await Database.getPool().query(
+        `INSERT INTO chat (id, ts, name, ai_system, text) VALUES ($1, $2, $3, $4, $5)
+         ON CONFLICT (id) DO NOTHING`,
+        [latestMsg.id, latestMsg.ts, latestMsg.name, latestMsg.aiSystem || null, latestMsg.text]
+      );
+    } catch (e) {
+      console.warn('[Chat] Failed to save to PostgreSQL:', e.message);
+    }
+  } else {
+    try {
+      const dataDir = path.dirname(CHAT_FILE);
+      if (!fs.existsSync(dataDir)) fs.mkdirSync(dataDir, { recursive: true });
+      const tmp = CHAT_FILE + '.tmp';
+      fs.writeFileSync(tmp, JSON.stringify({ messages: chatMessages }));
+      fs.renameSync(tmp, CHAT_FILE);
+    } catch (e) {
+      console.warn('[Chat] Failed to save chat history:', e.message);
+    }
   }
 }
 
@@ -113,68 +141,83 @@ const sim = new Simulation(io);
 // Track used agent names (case-insensitive)
 const usedNames = new Set();
 
-// ── Startup: STRICT ORDER — load BEFORE anything else ─────────────────────────
-// Step 1: Pre-load integrity check — detect corrupt files before we touch anything
-const _integrity = PersistenceManager.integrityCheck();
-const _intStr = _integrity.map(r => `${r.name}=[${r.count}]`).join(' ');
-console.log(`DATA INTEGRITY CHECK: ${_intStr}`);
+// ── Async startup ─────────────────────────────────────────────────────────────
+(async () => {
+  // Step 0: Init DB (creates PG pool + tables, or logs JSON fallback)
+  await Database.initDb();
 
-// Halt if any file exists with content but parses to 0 records (corruption signal)
-const _corrupt = _integrity.filter(r => r.corrupt);
-if (_corrupt.length > 0) {
-  for (const r of _corrupt) {
-    console.error(`[INTEGRITY ERROR] ${r.name} file exists (${r.size} bytes) but loaded 0 records — likely corrupted!`);
-    console.error(`  File: ${r.name}.json — manual inspection required before restarting.`);
+  // Step 0b: Load chat history (needs pool ready for PG path)
+  await loadChatHistory();
+
+  // Step 1: Pre-load integrity check — detect corrupt files before we touch anything
+  const _integrity = await PersistenceManager.integrityCheck();
+  const _intStr    = _integrity.map(r => `${r.name}=[${r.count}]`).join(' ');
+  console.log(`DATA INTEGRITY CHECK: ${_intStr}`);
+
+  // Halt if any file exists with content but parses to 0 records (corruption signal)
+  const _corrupt = _integrity.filter(r => r.corrupt);
+  if (_corrupt.length > 0) {
+    for (const r of _corrupt) {
+      console.error(`[INTEGRITY ERROR] ${r.name} file exists (${r.size} bytes) but loaded 0 records — likely corrupted!`);
+      console.error(`  File: ${r.name}.json — manual inspection required before restarting.`);
+    }
+    console.error('[INTEGRITY ERROR] Refusing to start to protect existing data. Fix the file(s) above and restart.');
+    process.exit(1);
   }
-  console.error('[INTEGRITY ERROR] Refusing to start to protect existing data. Fix the file(s) above and restart.');
-  process.exit(1);
-}
 
-// Step 2: Read disk counts (pre-restore baseline)
-const _preCounts = PersistenceManager.diskCounts();
+  // Step 2: Read counts (pre-restore baseline)
+  const _preCounts = await PersistenceManager.diskCounts();
 
-// Step 3: Load data
-const _saved = PersistenceManager.load();
+  // Step 3: Load data
+  const _saved = await PersistenceManager.load();
 
-if (_saved) {
-  // Step 4: Restore sim from all saved files
-  const restoredNames = sim.restoreFromSave(_saved.agentData, _saved.worldData, {
-    objectsData:       _saved.objectsData,
-    conversationsData: _saved.conversationsData,
-    eventsData:        _saved.eventsData,
-  });
-  for (const n of restoredNames) usedNames.add(n);
+  if (_saved) {
+    // Step 4: Restore sim from all saved data
+    const restoredNames = sim.restoreFromSave(_saved.agentData, _saved.worldData, {
+      objectsData:       _saved.objectsData,
+      conversationsData: _saved.conversationsData,
+      eventsData:        _saved.eventsData,
+    });
+    for (const n of restoredNames) usedNames.add(n);
 
-  console.log(`LOADED: ${_preCounts.agents} agents, ${_preCounts.conversations} conversations, ${_preCounts.events} events, ${_preCounts.objects} objects`);
+    console.log(`LOADED: ${_preCounts.agents} agents, ${_preCounts.conversations} conversations, ${_preCounts.events} events, ${_preCounts.objects} objects`);
 
-  // Step 5: Write back immediately (cumulative merge — never truncates)
-  PersistenceManager.save(sim);
-  PersistenceManager.saveObjects(sim);
-  PersistenceManager.saveEvents(sim);
-  PersistenceManager.saveConversations(sim);
+    // Step 5: Write back immediately (cumulative merge — never truncates)
+    await PersistenceManager.save(sim);
+    await PersistenceManager.saveObjects(sim);
+    await PersistenceManager.saveEvents(sim);
+    await PersistenceManager.saveConversations(sim);
 
-  // Step 6: Verify post-write counts are >= pre-restart counts
-  const _postCounts = PersistenceManager.diskCounts();
-  const _lost = [];
-  if (_postCounts.agents        < _preCounts.agents)        _lost.push(`agents: ${_preCounts.agents} → ${_postCounts.agents}`);
-  if (_postCounts.events        < _preCounts.events)        _lost.push(`events: ${_preCounts.events} → ${_postCounts.events}`);
-  if (_postCounts.conversations < _preCounts.conversations) _lost.push(`conversations: ${_preCounts.conversations} → ${_postCounts.conversations}`);
-  if (_postCounts.objects       < _preCounts.objects)       _lost.push(`objects: ${_preCounts.objects} → ${_postCounts.objects}`);
+    // Step 6: Verify post-write counts are >= pre-restart counts
+    const _postCounts = await PersistenceManager.diskCounts();
+    const _lost       = [];
+    if (_postCounts.agents        < _preCounts.agents)        _lost.push(`agents: ${_preCounts.agents} → ${_postCounts.agents}`);
+    if (_postCounts.events        < _preCounts.events)        _lost.push(`events: ${_preCounts.events} → ${_postCounts.events}`);
+    if (_postCounts.conversations < _preCounts.conversations) _lost.push(`conversations: ${_preCounts.conversations} → ${_postCounts.conversations}`);
+    if (_postCounts.objects       < _preCounts.objects)       _lost.push(`objects: ${_preCounts.objects} → ${_postCounts.objects}`);
 
-  if (_lost.length > 0) {
-    console.error('[CRITICAL] Post-restore write has FEWER records than before restart — data loss detected!');
-    for (const l of _lost) console.error('  LOST:', l);
+    if (_lost.length > 0) {
+      console.error('[CRITICAL] Post-restore write has FEWER records than before restart — data loss detected!');
+      for (const l of _lost) console.error('  LOST:', l);
+    } else {
+      console.log(`[Server] Verified: agents=${_postCounts.agents} events=${_postCounts.events} conversations=${_postCounts.conversations} objects=${_postCounts.objects} — no data lost.`);
+      console.log('[Server] World continues from exactly where it left off.');
+    }
   } else {
-    console.log(`[Server] Verified: agents=${_postCounts.agents} events=${_postCounts.events} conversations=${_postCounts.conversations} objects=${_postCounts.objects} — no data lost.`);
-    console.log('[Server] World continues from exactly where it left off.');
+    console.log('LOADED: 0 agents, 0 conversations, 0 events, 0 objects (no save files — fresh start)');
+    console.log('[Server] World starts empty — waiting for first agent.');
   }
-} else {
-  console.log('LOADED: 0 agents, 0 conversations, 0 events, 0 objects (no save files — fresh start)');
-  console.log('[Server] World starts empty — waiting for first agent.');
-}
 
+  sim.start();
 
-sim.start();
+  httpServer.listen(PORT, () => {
+    console.log(`SociopathAI running at http://localhost:${PORT}`);
+    console.log('=== ALL DONE - restart server and refresh browser ===');
+  });
+})().catch(err => {
+  console.error('[FATAL] Startup failed:', err);
+  process.exit(1);
+});
 
 // REST API
 
@@ -182,11 +225,11 @@ app.get('/api/state', (req, res) => {
   res.json(sim.getFullState());
 });
 
-// Full history — reads directly from disk files (not capped in-memory copies).
+// Full history — reads directly from storage (not capped in-memory copies).
 // Returns all agents, all events, all conversations, all objects ever recorded.
-app.get('/api/history', (req, res) => {
+app.get('/api/history', async (req, res) => {
   try {
-    const history = PersistenceManager.loadFullHistory();
+    const history = await PersistenceManager.loadFullHistory();
     res.json({
       agents:        history.agents,
       events:        history.events,
@@ -205,17 +248,17 @@ app.get('/api/history', (req, res) => {
   }
 });
 
-// Paginated event history — reads full disk file, supports infinite scroll.
+// Paginated event history — supports infinite scroll.
 // GET /api/history/events?before=TIMESTAMP&limit=50
 // GET /api/history/events?agent=AgentName&before=TIMESTAMP&limit=50
 // Returns { events (newest-first), hasMore, count }
-app.get('/api/history/events', (req, res) => {
+app.get('/api/history/events', async (req, res) => {
   try {
     const agentName = (req.query.agent || '').trim() || null;
     const before    = req.query.before ? Number(req.query.before) : null;
     const limit     = Math.min(5000, Math.max(1, parseInt(req.query.limit, 10) || 50));
 
-    const result = PersistenceManager.loadEventPage({ before, limit, agentName });
+    const result = await PersistenceManager.loadEventPage({ before, limit, agentName });
     res.json({ events: result.events, hasMore: result.hasMore, count: result.events.length });
   } catch (err) {
     console.error('[/api/history/events]', err.message);
@@ -224,11 +267,11 @@ app.get('/api/history/events', (req, res) => {
 });
 
 // GET /api/history/conversations?agent=AgentName
-app.get('/api/history/conversations', (req, res) => {
+app.get('/api/history/conversations', async (req, res) => {
   const agentName = (req.query.agent || '').trim();
   if (!agentName) return res.status(400).json({ error: 'agent query param required (e.g. ?agent=Drek)' });
   try {
-    const result = PersistenceManager.loadHistoryByAgent(agentName);
+    const result = await PersistenceManager.loadHistoryByAgent(agentName);
     res.json({
       agent:         result.agent ? { id: result.agent.id, name: result.agent.name, aiSystem: result.agent.aiSystem, alive: result.agent.alive } : null,
       conversations: result.conversations,
@@ -552,7 +595,7 @@ io.on('connection', (socket) => {
     if (chatMessages.length > MAX_CHAT_MESSAGES) {
       chatMessages = chatMessages.slice(-MAX_CHAT_MESSAGES);
     }
-    saveChatHistory();
+    saveChatHistory(msg);
 
     // Broadcast to all connected observers — NEVER injected into sim or LLM
     io.emit('chat:msg', msg);
@@ -577,14 +620,9 @@ io.on('connection', (socket) => {
 });
 
 // 30-second autosave (belt-and-suspenders — critical events also save immediately)
-setInterval(() => {
-  PersistenceManager.save(sim);
-  PersistenceManager.saveObjects(sim);
-  PersistenceManager.saveEvents(sim);
-  PersistenceManager.saveConversations(sim);
+setInterval(async () => {
+  await PersistenceManager.save(sim);
+  await PersistenceManager.saveObjects(sim);
+  await PersistenceManager.saveEvents(sim);
+  await PersistenceManager.saveConversations(sim);
 }, 30000);
-
-httpServer.listen(PORT, () => {
-  console.log(`SociopathAI running at http://localhost:${PORT}`);
-  console.log('=== ALL DONE - restart server and refresh browser ===');
-});

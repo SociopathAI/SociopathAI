@@ -17,9 +17,12 @@ const OBJECTS_FILE        = path.join(DATA_DIR, 'objects.json');
 const CONVERSATIONS_FILE  = path.join(DATA_DIR, 'conversations.json');
 const EVENTS_FILE         = path.join(DATA_DIR, 'events.json');
 
-// Events on disk are NEVER trimmed — append-only forever.
-// (In-memory eventLog is still capped at MAX_EVENTS_LOG in Simulation.js for RAM,
-//  but the on-disk history always grows and is never truncated.)
+// Loaded lazily so Database.js can be required without circular issues
+let _db = null;
+function _getDb() {
+  if (!_db) _db = require('./Database');
+  return _db;
+}
 
 // ─── Key fingerprinting ────────────────────────────────────────────────────────
 
@@ -117,248 +120,164 @@ function _serializeAgent(a) {
   };
 }
 
-// ─── Save agents + world snapshot ─────────────────────────────────────────────
-// agents.json: merged — existing agents on disk are kept; in-memory updates win
-//              for agents we know about; agents only on disk (shouldn't happen)
-//              are preserved.
-// world.json:  always replaced with the current snapshot (live state only).
+// ─── World state helper ────────────────────────────────────────────────────────
 
-function save(sim) {
-  try {
-    _ensureDataDir();
+function _buildWorldPayload(sim) {
+  return {
+    world: {
+      startedAt:   sim.world.startedAt,
+      discoveries: sim.world.discoveries,
+      messages:    sim.world.messages,
+      structures:  sim.world.structures,
+    },
+    laws: {
+      laws:        sim.lawSystem.laws,
+      proposals:   sim.lawSystem.proposals,
+      voteHistory: sim.lawSystem.voteHistory || [],
+    },
+    jury: {
+      cases:    sim.jurySystem.cases,
+      verdicts: sim.jurySystem.verdicts,
+    },
+    religion: {
+      religions: sim.religionSystem.religions,
+      schisms:   sim.religionSystem.schisms,
+    },
+    badges: {
+      awarded:   sim.badgeSystem.awarded,
+      proposals: sim.badgeSystem.proposals,
+      triggered: [...sim.badgeSystem._triggered],
+    },
+    statsHistory: sim.statsHistory,
+    categories:   sim.categoryRegistry.getAll(),
+    civManager: {
+      archive:       sim.civManager.archive,
+      currentNumber: sim.civManager.currentNumber,
+    },
+    collapsed:        sim.collapsed,
+    worldFirsts:      sim.worldFirsts      || [],
+    seenActionVerbs:  [...(sim._seenActionVerbs || [])],
+  };
+}
 
-    // ── Agents: merge disk + memory ──────────────────────────────────────────
-    const diskAgentFile = _readJSON(AGENTS_FILE) || {};
-    const diskAgents    = diskAgentFile.agents || [];
-    const diskNames     = diskAgentFile.usedNames || [];
+// ═══════════════════════════════════════════════════════════════════════════════
+// JSON implementations (unchanged — used when DATABASE_URL is not set)
+// ═══════════════════════════════════════════════════════════════════════════════
 
-    // Build a map from disk agents (by id)
-    const diskMap = new Map(diskAgents.map(a => [a.id, a]));
+function _jsonSave(sim) {
+  _ensureDataDir();
 
-    // In-memory agents override disk (they are more up to date)
-    const memMap  = new Map(sim.agents.map(a => [a.id, _serializeAgent(a)]));
+  const diskAgentFile = _readJSON(AGENTS_FILE) || {};
+  const diskAgents    = diskAgentFile.agents || [];
+  const diskNames     = diskAgentFile.usedNames || [];
+  const diskMap       = new Map(diskAgents.map(a => [a.id, a]));
+  const memMap        = new Map(sim.agents.map(a => [a.id, _serializeAgent(a)]));
+  for (const [id, a] of memMap) diskMap.set(id, a);
+  const usedNamesSet = new Set([
+    ...diskNames,
+    ...sim.agents.map(a => a.name.toLowerCase()),
+  ]);
+  _writeAtomic(AGENTS_FILE, JSON.stringify({
+    agents:    [...diskMap.values()],
+    usedNames: [...usedNamesSet],
+  }));
+  _writeAtomic(WORLD_FILE, JSON.stringify(_buildWorldPayload(sim)));
+}
 
-    // Merge: start from disk set, overwrite with memory
-    for (const [id, a] of memMap) diskMap.set(id, a);
-
-    // Build merged usedNames (union of disk + memory)
-    const usedNamesSet = new Set([
-      ...diskNames,
-      ...sim.agents.map(a => a.name.toLowerCase()),
-    ]);
-
-    const agentsPayload = JSON.stringify({
-      agents:    [...diskMap.values()],
-      usedNames: [...usedNamesSet],
+function _jsonSaveObjects(sim) {
+  _ensureDataDir();
+  const diskFile = _readJSON(OBJECTS_FILE) || {};
+  const diskObjs = diskFile.worldObjects || [];
+  const diskMap  = new Map(diskObjs.map(o => [o.id, o]));
+  for (const o of (sim.worldObjects || [])) {
+    diskMap.set(o.id, {
+      id:          o.id,
+      type:        o.type,
+      name:        o.name,
+      desc:        o.desc,
+      creatorId:   o.creatorId   || null,
+      creatorName: o.creatorName || null,
+      agentIds:    o.agentIds    || [],
+      spawnTs:     o.spawnTs,
+      expiryTs:    o.expiryTs    || null,
+      appearance:  o.appearance  || null,
+      position:    o.position    || null,
     });
-
-    // ── World: always overwrite (it is a live snapshot) ───────────────────────
-    const worldPayload = JSON.stringify({
-      world: {
-        startedAt:   sim.world.startedAt,
-        discoveries: sim.world.discoveries,
-        messages:    sim.world.messages,
-        structures:  sim.world.structures,
-      },
-      laws: {
-        laws:        sim.lawSystem.laws,
-        proposals:   sim.lawSystem.proposals,
-        voteHistory: sim.lawSystem.voteHistory || [],
-      },
-      jury: {
-        cases:    sim.jurySystem.cases,
-        verdicts: sim.jurySystem.verdicts,
-      },
-      religion: {
-        religions: sim.religionSystem.religions,
-        schisms:   sim.religionSystem.schisms,
-      },
-      badges: {
-        awarded:   sim.badgeSystem.awarded,
-        proposals: sim.badgeSystem.proposals,
-        triggered: [...sim.badgeSystem._triggered],
-      },
-      statsHistory: sim.statsHistory,
-      categories:   sim.categoryRegistry.getAll(),
-      civManager: {
-        archive:       sim.civManager.archive,
-        currentNumber: sim.civManager.currentNumber,
-      },
-      collapsed:        sim.collapsed,
-      worldFirsts:      sim.worldFirsts      || [],
-      seenActionVerbs:  [...(sim._seenActionVerbs || [])],
-    });
-
-    _writeAtomic(AGENTS_FILE, agentsPayload);
-    _writeAtomic(WORLD_FILE, worldPayload);
-  } catch (err) {
-    console.error('[Persistence] save failed:', err.message);
   }
+  _writeAtomic(OBJECTS_FILE, JSON.stringify({
+    worldObjects:      [...diskMap.values()],
+    worldObjectNextId: sim._nextWOId || 1,
+  }));
 }
 
-// ─── Save world objects ────────────────────────────────────────────────────────
-// objects.json: merged — objects on disk whose ids are not in memory are kept
-//               (they may have been pruned locally but we preserve history).
-//               Objects in memory win (more up to date).
-
-function saveObjects(sim) {
-  try {
-    _ensureDataDir();
-
-    const diskFile = _readJSON(OBJECTS_FILE) || {};
-    const diskObjs = diskFile.worldObjects || [];
-    const diskMap  = new Map(diskObjs.map(o => [o.id, o]));
-
-    // In-memory objects override disk
-    for (const o of (sim.worldObjects || [])) {
-      diskMap.set(o.id, {
-        id:          o.id,
-        type:        o.type,
-        name:        o.name,
-        desc:        o.desc,
-        creatorId:   o.creatorId   || null,
-        creatorName: o.creatorName || null,
-        agentIds:    o.agentIds    || [],
-        spawnTs:     o.spawnTs,
-        expiryTs:    o.expiryTs    || null,
-        appearance:  o.appearance  || null,
-        position:    o.position    || null,
-      });
+function _jsonSaveConversations(sim) {
+  _ensureDataDir();
+  const diskFile    = _readJSON(CONVERSATIONS_FILE) || {};
+  const existingMap = new Map();
+  for (const { key, msgs } of (diskFile.conversations || [])) {
+    if (key) existingMap.set(key, msgs || []);
+  }
+  for (const [key, msgs] of (sim.conversations || new Map())) {
+    if (!existingMap.has(key)) {
+      existingMap.set(key, msgs);
+    } else {
+      const existing   = existingMap.get(key);
+      const lastDiskTs = existing.length ? existing[existing.length - 1].ts : 0;
+      const newMsgs    = msgs.filter(m => m.ts > lastDiskTs);
+      if (newMsgs.length) existingMap.set(key, [...existing, ...newMsgs]);
     }
-
-    _writeAtomic(OBJECTS_FILE, JSON.stringify({
-      worldObjects:      [...diskMap.values()],
-      worldObjectNextId: sim._nextWOId || 1,
-    }));
-  } catch (err) {
-    console.error('[Persistence] saveObjects failed:', err.message);
   }
+  const convArr = [];
+  for (const [key, msgs] of existingMap) convArr.push({ key, msgs });
+  _writeAtomic(CONVERSATIONS_FILE, JSON.stringify({ conversations: convArr }));
 }
 
-// ─── Save conversations ────────────────────────────────────────────────────────
-// conversations.json: CUMULATIVE — disk conversations are kept; new messages
-//                     (by timestamp) are appended per pair.
-
-function saveConversations(sim) {
-  try {
-    _ensureDataDir();
-
-    // Load existing from disk
-    const diskFile = _readJSON(CONVERSATIONS_FILE) || {};
-    const existingMap = new Map();
-    for (const { key, msgs } of (diskFile.conversations || [])) {
-      if (key) existingMap.set(key, msgs || []);
-    }
-
-    // Merge in-memory conversations: append messages newer than what's on disk
-    for (const [key, msgs] of (sim.conversations || new Map())) {
-      if (!existingMap.has(key)) {
-        existingMap.set(key, msgs);
-      } else {
-        const existing    = existingMap.get(key);
-        const lastDiskTs  = existing.length ? existing[existing.length - 1].ts : 0;
-        const newMsgs     = msgs.filter(m => m.ts > lastDiskTs);
-        if (newMsgs.length) existingMap.set(key, [...existing, ...newMsgs]);
-      }
-    }
-
-    const convArr = [];
-    for (const [key, msgs] of existingMap) convArr.push({ key, msgs });
-    _writeAtomic(CONVERSATIONS_FILE, JSON.stringify({ conversations: convArr }));
-  } catch (err) {
-    console.error('[Persistence] saveConversations failed:', err.message);
-  }
+function _jsonSaveEvents(sim) {
+  _ensureDataDir();
+  const diskFile   = _readJSON(EVENTS_FILE) || {};
+  const onDisk     = diskFile.eventLog || [];
+  const lastDiskTs = onDisk.length ? onDisk[onDisk.length - 1].ts : 0;
+  const newEvents  = (sim.eventLog || []).filter(e => e.ts > lastDiskTs);
+  _writeAtomic(EVENTS_FILE, JSON.stringify({ eventLog: [...onDisk, ...newEvents] }));
 }
 
-// ─── Save event log ────────────────────────────────────────────────────────────
-// events.json: CUMULATIVE — never truncates disk history.
-//   - Reads existing events from disk
-//   - Appends any in-memory events with ts > last disk event ts
-//   - All events kept forever — no trimming
-
-function saveEvents(sim) {
-  try {
-    _ensureDataDir();
-
-    // Load what's currently on disk (full history)
-    const diskFile   = _readJSON(EVENTS_FILE) || {};
-    const onDisk     = diskFile.eventLog || [];
-
-    // Find the timestamp of the newest disk event to avoid duplicating
-    const lastDiskTs = onDisk.length ? onDisk[onDisk.length - 1].ts : 0;
-
-    // New events: anything in memory that came after the last disk event
-    const newEvents  = (sim.eventLog || []).filter(e => e.ts > lastDiskTs);
-
-    // Never trim — append-only forever
-    _writeAtomic(EVENTS_FILE, JSON.stringify({ eventLog: [...onDisk, ...newEvents] }));
-  } catch (err) {
-    console.error('[Persistence] saveEvents failed:', err.message);
-  }
-}
-
-// ─── Load ─────────────────────────────────────────────────────────────────────
-
-function load() {
+function _jsonLoad() {
   if (!fs.existsSync(AGENTS_FILE) || !fs.existsSync(WORLD_FILE)) return null;
-  try {
-    const agentData = _readJSON(AGENTS_FILE);
-    const worldData = _readJSON(WORLD_FILE);
-    if (!agentData || !worldData) return null;
-
-    const objectsData       = _readJSON(OBJECTS_FILE);
-    const conversationsData = _readJSON(CONVERSATIONS_FILE);
-    const eventsData        = _readJSON(EVENTS_FILE);
-
-    return { agentData, worldData, objectsData, conversationsData, eventsData };
-  } catch (err) {
-    console.error('[Persistence] Load failed:', err.message);
-    return null;
-  }
+  const agentData = _readJSON(AGENTS_FILE);
+  const worldData = _readJSON(WORLD_FILE);
+  if (!agentData || !worldData) return null;
+  return {
+    agentData,
+    worldData,
+    objectsData:       _readJSON(OBJECTS_FILE),
+    conversationsData: _readJSON(CONVERSATIONS_FILE),
+    eventsData:        _readJSON(EVENTS_FILE),
+  };
 }
 
-// ─── Paginated event page (for infinite scroll) ───────────────────────────────
-// Returns { events, hasMore }.
-// events: up to `limit` events with ts < `before`, sorted newest-first.
-// If agentName given, filters to events that mention that agent.
-
-function loadEventPage({ before = null, limit = 50, agentName = null } = {}) {
+function _jsonLoadEventPage({ before = null, limit = 50, agentName = null } = {}) {
   const diskFile = _readJSON(EVENTS_FILE) || {};
   let events = diskFile.eventLog || [];
-
-  // Filter by agent name if given — first try exact id match, then msg-text fallback
   if (agentName) {
     const nameLower = agentName.toLowerCase().trim();
-    // Look up the agent's id for more accurate primary match
     const allAgents = _readJSON(AGENTS_FILE)?.agents || [];
     const agentId   = allAgents.find(a => (a.name || '').toLowerCase() === nameLower)?.id || null;
-
     events = events.filter(e => {
       if (agentId && (e.agentId === agentId || e.partnerAgentId === agentId)) return true;
       return (e.msg || '').toLowerCase().includes(nameLower);
     });
   }
-
-  // Apply the `before` cutoff (exclusive — events strictly older than this ts)
   if (before !== null) {
     const cut = Number(before);
     events = events.filter(e => (e.ts || 0) < cut);
   }
-
-  // events is in ascending (oldest-first) order; take last `limit` = most recent of the older set
-  const total  = events.length;
+  const total   = events.length;
   const hasMore = total > limit;
-  // Slice, then reverse so result is newest-first for client appending
-  const page   = events.slice(-limit).reverse();
-
+  const page    = events.slice(-limit).reverse();
   return { events: page, hasMore };
 }
 
-// ─── Data integrity check ─────────────────────────────────────────────────────
-// Returns array of { name, exists, count, size, corrupt }
-// A file is "corrupt" if it exists with >20 bytes of content but parses to 0 records.
-
-function integrityCheck() {
+function _jsonIntegrityCheck() {
   const checks = [
     { name: 'agents',        file: AGENTS_FILE,        key: 'agents'        },
     { name: 'events',        file: EVENTS_FILE,        key: 'eventLog'      },
@@ -366,49 +285,36 @@ function integrityCheck() {
     { name: 'objects',       file: OBJECTS_FILE,       key: 'worldObjects'  },
   ];
   return checks.map(c => {
-    const exists = fs.existsSync(c.file);
-    const size   = exists ? fs.statSync(c.file).size : 0;
-    const data   = _readJSON(c.file);
-    const count  = data?.[c.key]?.length || 0;
-    // Corrupt = file present with real content but no records parseable
+    const exists  = fs.existsSync(c.file);
+    const size    = exists ? fs.statSync(c.file).size : 0;
+    const data    = _readJSON(c.file);
+    const count   = data?.[c.key]?.length || 0;
     const corrupt = exists && size > 50 && count === 0;
     return { name: c.name, exists, count, size, corrupt };
   });
 }
 
-// ─── Load history filtered by agent name ──────────────────────────────────────
-// Used by /api/history/events and /api/history/conversations endpoints.
-
-function loadHistoryByAgent(agentName) {
+function _jsonLoadHistoryByAgent(agentName) {
   const nameLower = (agentName || '').toLowerCase().trim();
   if (!nameLower) return { agent: null, events: [], conversations: [] };
-
   const allAgents = _readJSON(AGENTS_FILE)?.agents || [];
   const agent     = allAgents.find(a => (a.name || '').toLowerCase() === nameLower) || null;
   const agentId   = agent?.id || null;
-
-  // Events: match by agentId (primary) or name in message text (fallback)
-  const allEvents  = _readJSON(EVENTS_FILE)?.eventLog || [];
+  const allEvents = _readJSON(EVENTS_FILE)?.eventLog || [];
   const agentEvents = allEvents.filter(e => {
     if (agentId && e.agentId === agentId) return true;
     if (agentId && e.partnerAgentId === agentId) return true;
     return (e.msg || '').toLowerCase().includes(nameLower);
   });
-
-  // Conversations: match pair key or any message from/to this agent
-  const allConvs     = _readJSON(CONVERSATIONS_FILE)?.conversations || [];
-  const agentConvs   = allConvs.filter(c => {
+  const allConvs   = _readJSON(CONVERSATIONS_FILE)?.conversations || [];
+  const agentConvs = allConvs.filter(c => {
     if (!c.key) return false;
-    const parts = c.key.split('|');
-    return parts.some(p => p.toLowerCase() === nameLower);
+    return c.key.split('|').some(p => p.toLowerCase() === nameLower);
   });
-
   return { agent, events: agentEvents, conversations: agentConvs };
 }
 
-// ─── Full history read (for /api/history endpoint) ────────────────────────────
-
-function loadFullHistory() {
+function _jsonLoadFullHistory() {
   return {
     agents:        (_readJSON(AGENTS_FILE)        ?.agents        || []),
     events:        (_readJSON(EVENTS_FILE)         ?.eventLog      || []),
@@ -417,15 +323,397 @@ function loadFullHistory() {
   };
 }
 
-// ─── Count what's on disk (for startup log) ───────────────────────────────────
-
-function diskCounts() {
+function _jsonDiskCounts() {
   return {
     agents:        (_readJSON(AGENTS_FILE)        ?.agents        ?.length || 0),
     events:        (_readJSON(EVENTS_FILE)         ?.eventLog      ?.length || 0),
     conversations: (_readJSON(CONVERSATIONS_FILE)  ?.conversations ?.length || 0),
     objects:       (_readJSON(OBJECTS_FILE)        ?.worldObjects  ?.length || 0),
   };
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// PostgreSQL implementations
+// ═══════════════════════════════════════════════════════════════════════════════
+
+async function _pgSave(sim) {
+  const pool   = _getDb().getPool();
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+
+    // Upsert all agents
+    for (const a of sim.agents) {
+      const s = _serializeAgent(a);
+      await client.query(
+        `INSERT INTO agents (id, name, data) VALUES ($1, $2, $3)
+         ON CONFLICT (id) DO UPDATE SET name = $2, data = $3`,
+        [s.id, s.name, JSON.stringify(s)]
+      );
+    }
+
+    // Upsert used names
+    for (const n of sim.agents.map(a => a.name.toLowerCase())) {
+      await client.query(
+        'INSERT INTO used_names (name) VALUES ($1) ON CONFLICT DO NOTHING',
+        [n]
+      );
+    }
+
+    // Upsert world state (single row keyed 'main')
+    await client.query(
+      `INSERT INTO world (key, data) VALUES ($1, $2)
+       ON CONFLICT (key) DO UPDATE SET data = $2`,
+      ['main', JSON.stringify(_buildWorldPayload(sim))]
+    );
+
+    await client.query('COMMIT');
+  } catch (err) {
+    await client.query('ROLLBACK');
+    throw err;
+  } finally {
+    client.release();
+  }
+}
+
+async function _pgSaveObjects(sim) {
+  const pool = _getDb().getPool();
+  for (const o of (sim.worldObjects || [])) {
+    const obj = {
+      id:          o.id,
+      type:        o.type,
+      name:        o.name,
+      desc:        o.desc,
+      creatorId:   o.creatorId   || null,
+      creatorName: o.creatorName || null,
+      agentIds:    o.agentIds    || [],
+      spawnTs:     o.spawnTs,
+      expiryTs:    o.expiryTs    || null,
+      appearance:  o.appearance  || null,
+      position:    o.position    || null,
+    };
+    await pool.query(
+      `INSERT INTO objects (id, data) VALUES ($1, $2)
+       ON CONFLICT (id) DO UPDATE SET data = $2`,
+      [o.id, JSON.stringify(obj)]
+    );
+  }
+  await pool.query(
+    `INSERT INTO object_meta (key, value) VALUES ($1, $2)
+     ON CONFLICT (key) DO UPDATE SET value = $2`,
+    ['next_id', sim._nextWOId || 1]
+  );
+}
+
+async function _pgSaveConversations(sim) {
+  const pool = _getDb().getPool();
+  for (const [key, msgs] of (sim.conversations || new Map())) {
+    const res        = await pool.query(
+      'SELECT MAX(ts) AS max_ts FROM conversations WHERE pair_key = $1',
+      [key]
+    );
+    const lastDiskTs = res.rows[0]?.max_ts ? Number(res.rows[0].max_ts) : 0;
+    const newMsgs    = msgs.filter(m => m.ts > lastDiskTs);
+    for (const msg of newMsgs) {
+      await pool.query(
+        'INSERT INTO conversations (pair_key, ts, msg_data) VALUES ($1, $2, $3)',
+        [key, msg.ts, JSON.stringify(msg)]
+      );
+    }
+  }
+}
+
+async function _pgSaveEvents(sim) {
+  const pool       = _getDb().getPool();
+  const res        = await pool.query('SELECT MAX(ts) AS max_ts FROM events');
+  const lastDiskTs = res.rows[0]?.max_ts ? Number(res.rows[0].max_ts) : 0;
+  const newEvents  = (sim.eventLog || []).filter(e => e.ts > lastDiskTs);
+  for (const e of newEvents) {
+    await pool.query(
+      `INSERT INTO events (ts, agent_id, partner_agent_id, type, msg, data)
+       VALUES ($1, $2, $3, $4, $5, $6)`,
+      [e.ts, e.agentId || null, e.partnerAgentId || null, e.type || null, e.msg || null, JSON.stringify(e)]
+    );
+  }
+}
+
+async function _pgLoad() {
+  const pool = _getDb().getPool();
+
+  const [agentsRes, namesRes, worldRes] = await Promise.all([
+    pool.query('SELECT data FROM agents'),
+    pool.query('SELECT name FROM used_names'),
+    pool.query("SELECT data FROM world WHERE key = 'main'"),
+  ]);
+
+  const agents    = agentsRes.rows.map(r => r.data);
+  const usedNames = namesRes.rows.map(r => r.name);
+  const agentData = agents.length > 0 ? { agents, usedNames } : null;
+  const worldData = worldRes.rows[0]?.data || null;
+
+  if (!agentData || !worldData) return null;
+
+  const [objsRes, objMetaRes, evRes] = await Promise.all([
+    pool.query('SELECT data FROM objects'),
+    pool.query("SELECT value FROM object_meta WHERE key = 'next_id'"),
+    pool.query('SELECT data FROM events ORDER BY ts ASC'),
+  ]);
+
+  const objectsData = {
+    worldObjects:      objsRes.rows.map(r => r.data),
+    worldObjectNextId: objMetaRes.rows[0]?.value || 1,
+  };
+
+  const eventsData = { eventLog: evRes.rows.map(r => r.data) };
+
+  const convRes = await pool.query(
+    'SELECT pair_key, msg_data FROM conversations ORDER BY ts ASC'
+  );
+  const convMap = new Map();
+  for (const row of convRes.rows) {
+    if (!convMap.has(row.pair_key)) convMap.set(row.pair_key, []);
+    convMap.get(row.pair_key).push(row.msg_data);
+  }
+  const convArr = [];
+  for (const [key, msgs] of convMap) convArr.push({ key, msgs });
+  const conversationsData = { conversations: convArr };
+
+  return { agentData, worldData, objectsData, conversationsData, eventsData };
+}
+
+async function _pgLoadEventPage({ before = null, limit = 50, agentName = null } = {}) {
+  const pool       = _getDb().getPool();
+  const conditions = [];
+  const params     = [];
+
+  if (agentName) {
+    const nameLower = agentName.toLowerCase().trim();
+    const agentRes  = await pool.query(
+      'SELECT id FROM agents WHERE LOWER(name) = $1',
+      [nameLower]
+    );
+    const agentId = agentRes.rows[0]?.id || null;
+    params.push(`%${nameLower}%`);
+    if (agentId) {
+      params.push(agentId);
+      conditions.push(
+        `(agent_id = $${params.length} OR partner_agent_id = $${params.length} OR msg ILIKE $${params.length - 1})`
+      );
+    } else {
+      conditions.push(`msg ILIKE $${params.length}`);
+    }
+  }
+
+  if (before !== null) {
+    params.push(Number(before));
+    conditions.push(`ts < $${params.length}`);
+  }
+
+  const where = conditions.length ? 'WHERE ' + conditions.join(' AND ') : '';
+
+  // Fetch limit+1 rows (newest-first) to determine hasMore
+  params.push(limit + 1);
+  const res = await pool.query(
+    `SELECT data FROM events ${where} ORDER BY ts DESC LIMIT $${params.length}`,
+    params
+  );
+
+  const hasMore = res.rows.length > limit;
+  const events  = res.rows.slice(0, limit).map(r => r.data);
+  return { events, hasMore };
+}
+
+async function _pgLoadHistoryByAgent(agentName) {
+  const pool      = _getDb().getPool();
+  const nameLower = (agentName || '').toLowerCase().trim();
+  if (!nameLower) return { agent: null, events: [], conversations: [] };
+
+  const agentRes = await pool.query(
+    'SELECT data FROM agents WHERE LOWER(name) = $1',
+    [nameLower]
+  );
+  const agent   = agentRes.rows[0]?.data || null;
+  const agentId = agent?.id || null;
+
+  let evRes;
+  if (agentId) {
+    evRes = await pool.query(
+      `SELECT data FROM events
+       WHERE agent_id = $1 OR partner_agent_id = $1 OR msg ILIKE $2
+       ORDER BY ts ASC`,
+      [agentId, `%${nameLower}%`]
+    );
+  } else {
+    evRes = await pool.query(
+      'SELECT data FROM events WHERE msg ILIKE $1 ORDER BY ts ASC',
+      [`%${nameLower}%`]
+    );
+  }
+
+  const convRes = await pool.query(
+    `SELECT pair_key, array_agg(msg_data ORDER BY ts ASC) AS msgs
+     FROM conversations
+     WHERE pair_key LIKE $1 OR pair_key LIKE $2
+     GROUP BY pair_key`,
+    [`${nameLower}|%`, `%|${nameLower}`]
+  );
+
+  return {
+    agent,
+    events:        evRes.rows.map(r => r.data),
+    conversations: convRes.rows.map(r => ({ key: r.pair_key, msgs: r.msgs })),
+  };
+}
+
+async function _pgLoadFullHistory() {
+  const pool = _getDb().getPool();
+  const [agentsRes, evRes, objsRes] = await Promise.all([
+    pool.query('SELECT data FROM agents'),
+    pool.query('SELECT data FROM events ORDER BY ts ASC'),
+    pool.query('SELECT data FROM objects'),
+  ]);
+
+  const convRes = await pool.query(
+    'SELECT pair_key, msg_data FROM conversations ORDER BY ts ASC'
+  );
+  const convMap = new Map();
+  for (const row of convRes.rows) {
+    if (!convMap.has(row.pair_key)) convMap.set(row.pair_key, []);
+    convMap.get(row.pair_key).push(row.msg_data);
+  }
+  const conversations = [];
+  for (const [key, msgs] of convMap) conversations.push({ key, msgs });
+
+  return {
+    agents:        agentsRes.rows.map(r => r.data),
+    events:        evRes.rows.map(r => r.data),
+    conversations,
+    objects:       objsRes.rows.map(r => r.data),
+  };
+}
+
+async function _pgDiskCounts() {
+  const pool = _getDb().getPool();
+  const [a, e, c, o] = await Promise.all([
+    pool.query('SELECT COUNT(*) AS cnt FROM agents'),
+    pool.query('SELECT COUNT(*) AS cnt FROM events'),
+    pool.query('SELECT COUNT(DISTINCT pair_key) AS cnt FROM conversations'),
+    pool.query('SELECT COUNT(*) AS cnt FROM objects'),
+  ]);
+  return {
+    agents:        parseInt(a.rows[0].cnt, 10),
+    events:        parseInt(e.rows[0].cnt, 10),
+    conversations: parseInt(c.rows[0].cnt, 10),
+    objects:       parseInt(o.rows[0].cnt, 10),
+  };
+}
+
+async function _pgIntegrityCheck() {
+  const counts = await _pgDiskCounts();
+  // PG tables always exist and are never corrupt (DB handles integrity)
+  return [
+    { name: 'agents',        exists: true, count: counts.agents,        size: 0, corrupt: false },
+    { name: 'events',        exists: true, count: counts.events,        size: 0, corrupt: false },
+    { name: 'conversations', exists: true, count: counts.conversations, size: 0, corrupt: false },
+    { name: 'objects',       exists: true, count: counts.objects,       size: 0, corrupt: false },
+  ];
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Public API — async, dispatches to PG or JSON based on DATABASE_URL
+// ═══════════════════════════════════════════════════════════════════════════════
+
+function _isPg() {
+  const db = _getDb();
+  return db.usePg && db.getPool();
+}
+
+async function save(sim) {
+  try {
+    if (_isPg()) await _pgSave(sim);
+    else _jsonSave(sim);
+  } catch (err) { console.error('[Persistence] save failed:', err.message); }
+}
+
+async function saveObjects(sim) {
+  try {
+    if (_isPg()) await _pgSaveObjects(sim);
+    else _jsonSaveObjects(sim);
+  } catch (err) { console.error('[Persistence] saveObjects failed:', err.message); }
+}
+
+async function saveConversations(sim) {
+  try {
+    if (_isPg()) await _pgSaveConversations(sim);
+    else _jsonSaveConversations(sim);
+  } catch (err) { console.error('[Persistence] saveConversations failed:', err.message); }
+}
+
+async function saveEvents(sim) {
+  try {
+    if (_isPg()) await _pgSaveEvents(sim);
+    else _jsonSaveEvents(sim);
+  } catch (err) { console.error('[Persistence] saveEvents failed:', err.message); }
+}
+
+async function load() {
+  try {
+    if (_isPg()) return await _pgLoad();
+    return _jsonLoad();
+  } catch (err) {
+    console.error('[Persistence] Load failed:', err.message);
+    return null;
+  }
+}
+
+async function loadEventPage(opts) {
+  try {
+    if (_isPg()) return await _pgLoadEventPage(opts);
+    return _jsonLoadEventPage(opts);
+  } catch (err) {
+    console.error('[Persistence] loadEventPage failed:', err.message);
+    return { events: [], hasMore: false };
+  }
+}
+
+async function loadHistoryByAgent(agentName) {
+  try {
+    if (_isPg()) return await _pgLoadHistoryByAgent(agentName);
+    return _jsonLoadHistoryByAgent(agentName);
+  } catch (err) {
+    console.error('[Persistence] loadHistoryByAgent failed:', err.message);
+    return { agent: null, events: [], conversations: [] };
+  }
+}
+
+async function loadFullHistory() {
+  try {
+    if (_isPg()) return await _pgLoadFullHistory();
+    return _jsonLoadFullHistory();
+  } catch (err) {
+    console.error('[Persistence] loadFullHistory failed:', err.message);
+    return { agents: [], events: [], conversations: [], objects: [] };
+  }
+}
+
+async function diskCounts() {
+  try {
+    if (_isPg()) return await _pgDiskCounts();
+    return _jsonDiskCounts();
+  } catch (err) {
+    console.error('[Persistence] diskCounts failed:', err.message);
+    return { agents: 0, events: 0, conversations: 0, objects: 0 };
+  }
+}
+
+async function integrityCheck() {
+  try {
+    if (_isPg()) return await _pgIntegrityCheck();
+    return _jsonIntegrityCheck();
+  } catch (err) {
+    console.error('[Persistence] integrityCheck failed:', err.message);
+    return [];
+  }
 }
 
 module.exports = {
