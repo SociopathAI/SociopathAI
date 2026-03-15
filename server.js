@@ -1,6 +1,7 @@
 // SociopathAI — Autonomous AI Civilization Experiment
 // Backend: Express + Socket.IO
 
+console.log("ALL ENV VARS:", Object.keys(process.env).filter(k => k.includes('DATABASE') || k.includes('POSTGRES')));
 console.log('ENV CHECK: DATABASE_URL =', process.env.DATABASE_URL ? 'SET' : 'NOT SET');
 
 const express = require('express');
