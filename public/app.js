@@ -1743,7 +1743,7 @@ function _renderEvLogDlgThread(thread, myNames, agentSystems, agentColorMap) {
           <span class="chat-speaker">${esc(m.from)}</span>
           <span class="chat-ts">${fmtTime(m.ts)}</span>
         </div>
-        <div class="chat-bubble">${truncHtml(m.text)}</div>
+        <div class="chat-bubble">${truncHtml(m.text, 200)}</div>
         ${noResp}
       </div>`;
   }
@@ -1929,7 +1929,7 @@ function _renderFocusDlgThread(thread, agentId, agentMap) {
           <span class="fdlg-speaker" style="color:${isMine ? focusColor : partnerColor}">${esc(m.from)}</span>
           <span class="fdlg-ts">${fmtTime(m.ts)}</span>
         </div>
-        <div class="fdlg-bubble" ${colorAttr}>${esc(m.text)}</div>
+        <div class="fdlg-bubble" ${colorAttr}>${truncHtml(m.text, 200)}</div>
       </div>`;
   }
 
@@ -2296,7 +2296,7 @@ function _renderConvoThread(thread, myNames, agentSystems, agentColorMap, focusN
           <span class="chat-speaker">${esc(m.from)}</span>
           <span class="chat-ts">${fmtTime(m.ts)}</span>
         </div>
-        <div class="chat-bubble">${esc(m.text)}</div>
+        <div class="chat-bubble">${truncHtml(m.text, 200)}</div>
         ${noRespHtml}
       </div>`;
   }
@@ -2708,12 +2708,12 @@ function capitalize(s) {
 // ── Truncatable text ──────────────────────────────────────────────────────────
 // Returns HTML: if text > limit, wraps in .trunc-text with data-full/data-short.
 // Clicking the element (capture-phase global handler below) toggles expansion.
-function truncHtml(rawText, limit = 120) {
+function truncHtml(rawText, limit = 150) {
   if (!rawText) return '';
   const full = String(rawText);
   if (full.length <= limit) return esc(full);
   const short = full.slice(0, limit);
-  return `<span class="trunc-text" data-full="${esc(full)}" data-short="${esc(short)}">${esc(short)}<span class="trunc-ellipsis">\u2026</span></span>`;
+  return `<span class="trunc-text" data-full="${esc(full)}" data-short="${esc(short)}">${esc(short)}<span class="trunc-ellipsis"> ... [click to expand]</span></span>`;
 }
 
 // Global capture-phase handler — runs before any child click handler so
@@ -2722,13 +2722,17 @@ document.addEventListener('click', function(e) {
   const el = e.target.closest('.trunc-text');
   if (!el) return;
   const isExpanded = el.dataset.expanded === '1';
-  if (isExpanded) {
-    el.innerHTML = esc(el.dataset.short) + '<span class="trunc-ellipsis">\u2026</span>';
-    el.dataset.expanded = '0';
-  } else {
-    el.textContent = el.dataset.full;
-    el.dataset.expanded = '1';
-  }
+  el.style.opacity = '0';
+  setTimeout(() => {
+    if (isExpanded) {
+      el.innerHTML = esc(el.dataset.short) + '<span class="trunc-ellipsis"> ... [click to expand]</span>';
+      el.dataset.expanded = '0';
+    } else {
+      el.innerHTML = esc(el.dataset.full) + '<span class="trunc-ellipsis"> [click to collapse]</span>';
+      el.dataset.expanded = '1';
+    }
+    el.style.opacity = '';
+  }, 150);
   e.stopPropagation();
 }, true);
 
