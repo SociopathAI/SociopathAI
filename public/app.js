@@ -1762,13 +1762,15 @@ function _renderEvLogDlgThread(thread, myNames, agentSystems, agentColorMap) {
     const bId    = String(m.ts || '') + '|' + (m.from || '');
     const bLong  = (m.text || '').length > CB_LIMIT;
     const bExp   = bLong && expandedBubbles.has(bId);
+    const bStyle = bExp ? ' style="max-height:none;overflow:visible;"' : '';
+    const bHtml  = bExp ? chatBubbleHtmlExpanded(m.text) : chatBubbleHtml(m.text);
     bubblesHtml += `
       <div class="chat-row ${side}" style="${cs}">
         <div class="chat-meta-row">
           <span class="chat-speaker">${esc(m.from)}</span>
           <span class="chat-ts">${fmtTime(m.ts)}</span>
         </div>
-        <div class="chat-bubble${bLong ? ' has-more' : ''}${bExp ? ' cb-expanded' : ''}" data-bubble-id="${esc(bId)}">${chatBubbleHtml(m.text)}</div>
+        <div class="chat-bubble${bLong ? ' has-more' : ''}${bExp ? ' cb-expanded' : ''}" data-bubble-id="${esc(bId)}" data-text="${esc(m.text)}"${bStyle}>${bHtml}</div>
         ${noResp}
       </div>`;
   }
@@ -1948,13 +1950,18 @@ function _renderFocusDlgThread(thread, agentId, agentMap) {
     const side      = isMine ? 'fdlg-bubble-mine' : 'fdlg-bubble-theirs';
     const c = isMine ? focusColor : partnerColor;
     const colorAttr = `style="--bubble-color:color-mix(in srgb,${c} 15%,transparent);--bubble-border:color-mix(in srgb,${c} 40%,transparent)"`;
+    const fbId    = String(m.ts || '') + '|' + (m.from || '');
+    const fbLong  = (m.text || '').length > CB_LIMIT;
+    const fbExp   = fbLong && expandedBubbles.has(fbId);
+    const fbStyle = fbExp ? ' style="max-height:none;overflow:visible;"' : '';
+    const fbHtml  = fbExp ? chatBubbleHtmlExpanded(m.text) : chatBubbleHtml(m.text);
     bubblesHtml += `
       <div class="fdlg-chat-row ${side}">
         <div class="fdlg-meta-row">
           <span class="fdlg-speaker" style="color:${isMine ? focusColor : partnerColor}">${esc(m.from)}</span>
           <span class="fdlg-ts">${fmtTime(m.ts)}</span>
         </div>
-        <div class="fdlg-bubble${(m.text || '').length > CB_LIMIT ? ' has-more' : ''}${expandedBubbles.has(String(m.ts || '') + '|' + (m.from || '')) ? ' cb-expanded' : ''}" data-bubble-id="${esc(String(m.ts || '') + '|' + (m.from || ''))}" ${colorAttr}>${chatBubbleHtml(m.text)}</div>
+        <div class="fdlg-bubble${fbLong ? ' has-more' : ''}${fbExp ? ' cb-expanded' : ''}" data-bubble-id="${esc(fbId)}" data-text="${esc(m.text)}" ${colorAttr}${fbStyle}>${fbHtml}</div>
       </div>`;
   }
 
@@ -2315,16 +2322,18 @@ function _renderConvoThread(thread, myNames, agentSystems, agentColorMap, focusN
     const isLast   = i === thread.messages.length - 1;
     const noRespHtml = (isLast && singleUnanswered)
       ? '<div class="chat-no-response">no response</div>' : '';
-    const bId2  = String(m.ts || '') + '|' + (m.from || '');
+    const bId2   = String(m.ts || '') + '|' + (m.from || '');
     const bLong2 = (m.text || '').length > CB_LIMIT;
     const bExp2  = bLong2 && expandedBubbles.has(bId2);
+    const bStyle2 = bExp2 ? ' style="max-height:none;overflow:visible;"' : '';
+    const bHtml2  = bExp2 ? chatBubbleHtmlExpanded(m.text) : chatBubbleHtml(m.text);
     bubblesHtml += `
       <div class="chat-row ${side}" style="${colorStyle}">
         <div class="chat-meta-row">
           <span class="chat-speaker">${esc(m.from)}</span>
           <span class="chat-ts">${fmtTime(m.ts)}</span>
         </div>
-        <div class="chat-bubble${bLong2 ? ' has-more' : ''}${bExp2 ? ' cb-expanded' : ''}" data-bubble-id="${esc(bId2)}">${chatBubbleHtml(m.text)}</div>
+        <div class="chat-bubble${bLong2 ? ' has-more' : ''}${bExp2 ? ' cb-expanded' : ''}" data-bubble-id="${esc(bId2)}" data-text="${esc(m.text)}"${bStyle2}>${bHtml2}</div>
         ${noRespHtml}
       </div>`;
   }
@@ -2756,23 +2765,38 @@ document.addEventListener('click', function(e) {
 
 const CB_LIMIT = 100;
 
-// Returns inner HTML for a chat/fdlg bubble with click-to-expand support.
+// Returns collapsed inner HTML for a chat/fdlg bubble (short preview + dots).
 function chatBubbleHtml(text) {
   const t = text || '';
   if (t.length <= CB_LIMIT) return esc(t);
-  return `<span class="cb-short">${esc(t.slice(0, CB_LIMIT))}<span class="cb-dots"> …</span></span>` +
-         `<span class="cb-full">${esc(t)}</span>`;
+  return `<span class="cb-short">${esc(t.slice(0, CB_LIMIT))}<span class="cb-dots"> …</span></span>`;
+}
+
+// Returns expanded inner HTML — full raw text, no limit.
+function chatBubbleHtmlExpanded(text) {
+  return esc(text || '');
 }
 
 // Click-to-expand handler for chat bubbles.
+// Directly rewrites innerHTML so expansion never depends on CSS display toggling.
 // Syncs with expandedBubbles Set so expansion survives thread re-renders.
 document.addEventListener('click', function(e) {
   const bubble = e.target.closest('.chat-bubble.has-more, .fdlg-bubble.has-more');
   if (!bubble) return;
-  bubble.classList.toggle('cb-expanded');
+  const fullText = bubble.dataset.text || '';
+  const isExpanded = bubble.classList.toggle('cb-expanded');
+  if (isExpanded) {
+    bubble.innerHTML = chatBubbleHtmlExpanded(fullText);
+    bubble.style.maxHeight = 'none';
+    bubble.style.overflow  = 'visible';
+  } else {
+    bubble.innerHTML = chatBubbleHtml(fullText);
+    bubble.style.maxHeight = '';
+    bubble.style.overflow  = '';
+  }
   const id = bubble.dataset.bubbleId;
   if (id) {
-    if (bubble.classList.contains('cb-expanded')) expandedBubbles.add(id);
+    if (isExpanded) expandedBubbles.add(id);
     else expandedBubbles.delete(id);
   }
   e.stopPropagation();

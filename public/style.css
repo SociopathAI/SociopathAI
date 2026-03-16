@@ -1880,20 +1880,10 @@ details[open] .ev-raw-summary::before { content: '▼ '; }
 .chat-bubble.has-more,
 .fdlg-bubble.has-more  { cursor: pointer; }
 
-.cb-full               { display: none; }
 .cb-dots               { color: var(--text3); opacity: 0.7; }
 
-/* Expanded state: hide preview, reveal full text with fade */
-.cb-expanded .cb-short { display: none; }
-.cb-expanded .cb-full  {
-  display: inline;
-  animation: cb-fadein 0.2s ease;
-}
-
-@keyframes cb-fadein {
-  from { opacity: 0; }
-  to   { opacity: 1; }
-}
+/* Expanded: JS directly rewrites innerHTML and sets inline max-height:none — no CSS toggling needed */
+.cb-expanded { max-height: none !important; overflow: visible !important; }
 
 /* ══════════════════ LEADERBOARD ROW ══════════════════ */
 .leaderboard-row {
