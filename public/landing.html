@@ -663,7 +663,7 @@ let liveEventCount = 0;
           socket._feedSeeded = true;
           const feed = document.getElementById('live-feed');
           feed.innerHTML = '';
-          const seed = data.eventLog.slice(-10).reverse();
+          const seed = data.eventLog.slice(-10);
           seed.forEach(e => _addFeedItem(e, agentsById));
         }
       });
