@@ -73,7 +73,8 @@
       "Bash(cmd.exe /c \"netstat -ano | findstr :3000 | findstr LISTENING\" 2>&1)",
       "Bash(cmd.exe /c \"netstat -ano | findstr :3000\" 2>&1)",
       "Bash(find:*)",
-      "Bash(ls:*)"
+      "Bash(ls:*)",
+      "Bash(echo:*)"
     ]
   }
 }
