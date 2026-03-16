@@ -10,16 +10,28 @@ const path = require('path');
 // models: try in order until one works
 
 const PROVIDER_PROFILES = {
-  Claude:      { type: 'anthropic', base: 'https://api.anthropic.com',          models: ['claude-haiku-4-5-20251001', 'claude-3-haiku-20240307'] },
-  ChatGPT:     { type: 'oai',       base: 'https://api.openai.com',             models: ['gpt-4o-mini', 'gpt-3.5-turbo'] },
-  Gemini:      { type: 'google',    base: null,                                  models: ['gemini-1.5-flash', 'gemini-2.0-flash-lite', 'gemini-pro'] },
-  Groq:        { type: 'oai',       base: 'https://api.groq.com/openai',        models: ['llama-3.3-70b-versatile', 'llama-3.1-8b-instant', 'gemma2-9b-it'] },
-  Llama:       { type: 'oai',       base: 'https://api.groq.com/openai',        models: ['llama-3.3-70b-versatile', 'llama-3.1-8b-instant', 'gemma2-9b-it'] },
-  Grok:        { type: 'oai',       base: 'https://api.x.ai',                   models: ['grok-3-mini', 'grok-2-1212', 'grok-beta'] },
-  Mistral:     { type: 'oai',       base: 'https://api.mistral.ai',             models: ['mistral-small-latest', 'mistral-tiny'] },
-  DeepSeek:    { type: 'oai',       base: 'https://api.deepseek.com',           models: ['deepseek-chat'] },
-  OpenRouter:  { type: 'oai',       base: 'https://openrouter.ai/api',          models: ['meta-llama/llama-3.3-70b-instruct:free'], openrouter: true },
-  Other:       { type: 'oai',       base: 'https://api.openai.com',             models: ['gpt-4o-mini', 'gpt-3.5-turbo'] },
+  Claude:      { type: 'anthropic', base: 'https://api.anthropic.com',           models: ['claude-haiku-4-5-20251001', 'claude-3-haiku-20240307'] },
+  ChatGPT:     { type: 'oai',       base: 'https://api.openai.com',              models: ['gpt-4o-mini', 'gpt-3.5-turbo'] },
+  Gemini:      { type: 'google',    base: null,                                   models: ['gemini-1.5-flash', 'gemini-1.5-pro', 'gemini-pro'] },
+  Groq:        { type: 'oai',       base: 'https://api.groq.com/openai',         models: ['llama-3.3-70b-versatile', 'llama-3.1-8b-instant', 'gemma2-9b-it'] },
+  Llama:       { type: 'oai',       base: 'https://api.groq.com/openai',         models: ['llama-3.3-70b-versatile', 'llama-3.1-8b-instant', 'gemma2-9b-it'] },
+  Grok:        { type: 'oai',       base: 'https://api.x.ai',                    models: ['grok-3-mini', 'grok-2-1212'] },
+  Mistral:     { type: 'oai',       base: 'https://api.mistral.ai',              models: ['mistral-small-latest', 'mistral-tiny'] },
+  DeepSeek:    { type: 'oai',       base: 'https://api.deepseek.com',            models: ['deepseek-chat'] },
+  OpenRouter:  { type: 'oai',       base: 'https://openrouter.ai/api',           models: ['meta-llama/llama-3.3-70b-instruct:free', 'google/gemma-2-9b-it:free'], openrouter: true },
+  Other:       { type: 'oai',       base: 'https://api.openai.com',              models: ['gpt-4o-mini', 'gpt-3.5-turbo'] },
+};
+
+// Hardcoded safe fallbacks per provider — used when all dynamic models are exhausted
+const PROVIDER_FALLBACKS = {
+  Claude:      ['claude-haiku-4-5-20251001', 'claude-3-haiku-20240307'],
+  ChatGPT:     ['gpt-4o-mini', 'gpt-3.5-turbo'],
+  Other:       ['gpt-4o-mini', 'gpt-3.5-turbo'],
+  Gemini:      ['gemini-1.5-flash'],
+  Groq:        ['llama-3.3-70b-versatile', 'llama-3.1-8b-instant', 'gemma2-9b-it'],
+  Llama:       ['llama-3.3-70b-versatile', 'llama-3.1-8b-instant', 'gemma2-9b-it'],
+  Grok:        ['grok-3-mini', 'grok-2-1212'],
+  OpenRouter:  ['meta-llama/llama-3.3-70b-instruct:free', 'google/gemma-2-9b-it:free'],
 };
 
 // ─── Free will declaration — injected into every LLM prompt ────────────────────
@@ -243,10 +255,14 @@ function getKey(agent) {
 // ─── Single HTTP attempt for one model ────────────────────────────────────────
 // Returns: text string, null (hard fail), _MODEL_NOT_FOUND (try next), or _RATE_LIMITED (429)
 
-const _MODEL_NOT_FOUND = Symbol('MODEL_NOT_FOUND');
-const _RATE_LIMITED    = Symbol('RATE_LIMITED');
-const _AUTH_ERROR      = Symbol('AUTH_ERROR');
-const _SERVER_ERROR    = Symbol('SERVER_ERROR');
+const _MODEL_NOT_FOUND  = Symbol('MODEL_NOT_FOUND');
+const _RATE_LIMITED     = Symbol('RATE_LIMITED');
+const _AUTH_ERROR       = Symbol('AUTH_ERROR');
+const _SERVER_ERROR     = Symbol('SERVER_ERROR');
+const _NOT_CHAT_MODEL   = Symbol('NOT_CHAT_MODEL'); // model exists but doesn't support chat completions
+
+// Session-level set of models confirmed to not support chat completions — never retried
+const _excludedModels = new Set();
 
 async function _singleCall(apiKey, profile, model, system, user, maxTokens, timeoutMs) {
   const ctl   = new AbortController();
@@ -313,9 +329,15 @@ async function _singleCall(apiKey, profile, model, system, user, maxTokens, time
       return _AUTH_ERROR;
     }
 
-    // Model not found → try next model in list
+    // Model not found / unsupported → try next model in list
     if (res.status === 404 || res.status === 400) {
       const body = await res.text().catch(() => '');
+      // Detect non-chat models (audio, image, embedding, decommissioned, etc.)
+      if (/does not support chat completions|not supported for chat|decommissioned|This model.*not.*chat/i.test(body)) {
+        console.warn(`[${ts()}] [LLM-SKIP] ${profile.name} [${model}]: excluded - does not support chat`);
+        _excludedModels.add(model);
+        return _NOT_CHAT_MODEL;
+      }
       if (/model.*(not found|doesn.t exist|unavailable|not supported)|no such model|invalid.?model/i.test(body)) {
         console.warn(`[${ts()}] [LLM-MODEL] ${profile.name}/${model}: not available, trying next`);
         // For Groq: invalidate model cache so we refetch next time
@@ -388,15 +410,38 @@ async function _rawCall(apiKey, aiSystem, system, user, maxTokens, timeoutMs, ag
     console.error(`[${new Date().toLocaleTimeString()}] [LLM-FAIL] ${agentName || aiSystem}: no provider resolved — connection pending`);
     return null;
   }
-  let anyRateLimited  = false;
-  let anyServerError  = false;
-  for (const model of profile.models) {
+
+  // Filter out models excluded this session (confirmed non-chat) before we start
+  const activeModels = profile.models.filter(m => !_excludedModels.has(m));
+  // If all were excluded, try the hardcoded fallback list (also filtered)
+  const fallback     = (PROVIDER_FALLBACKS[profile.name] || []).filter(m => !_excludedModels.has(m));
+  const modelsToTry  = activeModels.length > 0 ? activeModels : fallback;
+
+  let anyRateLimited = false;
+  let anyServerError = false;
+
+  for (const model of modelsToTry) {
     const result = await _singleCall(apiKey, profile, model, system, user, maxTokens, timeoutMs);
-    if (result === _AUTH_ERROR)    return _AUTH_ERROR;     // stop immediately — key is bad
-    if (result === _RATE_LIMITED)  { anyRateLimited = true; continue; }  // try next model
-    if (result === _SERVER_ERROR)  { anyServerError  = true; continue; } // try next model
-    if (result !== _MODEL_NOT_FOUND) return result; // null or text — stop trying
+    if (result === _AUTH_ERROR)    return _AUTH_ERROR;
+    if (result === _RATE_LIMITED)  { anyRateLimited = true; continue; }
+    if (result === _SERVER_ERROR)  { anyServerError  = true; continue; }
+    if (result === _NOT_CHAT_MODEL) continue; // already added to _excludedModels in _singleCall
+    if (result !== _MODEL_NOT_FOUND) return result;
   }
+
+  // If primary list was exhausted and we haven't tried the fallback yet, retry with it
+  if (activeModels.length > 0 && fallback.length > 0) {
+    const fallbackFiltered = fallback.filter(m => !_excludedModels.has(m));
+    for (const model of fallbackFiltered) {
+      const result = await _singleCall(apiKey, profile, model, system, user, maxTokens, timeoutMs);
+      if (result === _AUTH_ERROR)     return _AUTH_ERROR;
+      if (result === _RATE_LIMITED)   { anyRateLimited = true; continue; }
+      if (result === _SERVER_ERROR)   { anyServerError  = true; continue; }
+      if (result === _NOT_CHAT_MODEL) continue;
+      if (result !== _MODEL_NOT_FOUND) return result;
+    }
+  }
+
   if (anyRateLimited) {
     console.warn(`[LLM-429] ${profile.name}: all models rate-limited`);
     return _RATE_LIMITED;
@@ -405,7 +450,7 @@ async function _rawCall(apiKey, aiSystem, system, user, maxTokens, timeoutMs, ag
     console.warn(`[LLM-500] ${profile.name}: all models returned server error — will retry once in 30s`);
     return _SERVER_ERROR;
   }
-  console.error(`[LLM-FAIL] ${profile.name}: all models exhausted (${profile.models.join(', ')})`);
+  console.error(`[LLM-FAIL] ${profile.name}: all models exhausted (${modelsToTry.join(', ')})`);
   return null;
 }
 
