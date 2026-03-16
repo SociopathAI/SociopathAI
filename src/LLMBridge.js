@@ -176,9 +176,10 @@ function getKey(agent) {
 }
 
 // ─── Single HTTP attempt for one model ────────────────────────────────────────
-// Returns: text string, null (hard fail), or _MODEL_NOT_FOUND (try next model)
+// Returns: text string, null (hard fail), _MODEL_NOT_FOUND (try next), or _RATE_LIMITED (429)
 
 const _MODEL_NOT_FOUND = Symbol('MODEL_NOT_FOUND');
+const _RATE_LIMITED    = Symbol('RATE_LIMITED');
 
 async function _singleCall(apiKey, profile, model, system, user, maxTokens, timeoutMs) {
   const ctl   = new AbortController();
@@ -247,6 +248,12 @@ async function _singleCall(apiKey, profile, model, system, user, maxTokens, time
       return null;
     }
 
+    if (res.status === 429) {
+      const body = await res.text().catch(() => '');
+      console.warn(`[${ts()}] [LLM-429] ${profile.name}/${model}: rate limited — trying next model. ${body.slice(0, 80)}`);
+      return _RATE_LIMITED;
+    }
+
     if (!res.ok) {
       const body = await res.text().catch(() => '');
       console.error(`[${ts()}] [LLM-FAIL] ${profile.name} [${model}]: HTTP ${res.status}: ${body.slice(0, 120)}`);
@@ -296,9 +303,15 @@ async function _rawCall(apiKey, aiSystem, system, user, maxTokens, timeoutMs, ag
     console.error(`[${new Date().toLocaleTimeString()}] [LLM-FAIL] ${agentName || aiSystem}: no provider resolved — connection pending`);
     return null;
   }
+  let anyRateLimited = false;
   for (const model of profile.models) {
     const result = await _singleCall(apiKey, profile, model, system, user, maxTokens, timeoutMs);
+    if (result === _RATE_LIMITED) { anyRateLimited = true; continue; } // try smaller model
     if (result !== _MODEL_NOT_FOUND) return result; // null or text — stop trying
+  }
+  if (anyRateLimited) {
+    console.warn(`[LLM-429] ${profile.name}: all models rate-limited`);
+    return _RATE_LIMITED;
   }
   console.error(`[LLM-FAIL] ${profile.name}: all models exhausted (${profile.models.join(', ')})`);
   return null;
@@ -668,14 +681,14 @@ async function decideAction(agent, world, allAgents, worldAwareness) {
   const timeoutMs = 12000;
 
   let text = await _rawCall(key, agent.aiSystem, system, user, 400, timeoutMs);
+  if (text === _RATE_LIMITED) {
+    agent.rateLimitedUntil = Date.now() + 60000;
+    console.warn(`[LLM-429] ${agent.name}: all models rate-limited — backing off 60s`);
+    return null;
+  }
   if (!text) {
-    console.log(`[LLM-RETRY] ${agent.name} (${agent.aiSystem}): no response, retrying in 5s…`);
-    await new Promise(r => setTimeout(r, 5000));
-    text = await _rawCall(key, agent.aiSystem, system, user, 400, timeoutMs);
-    if (!text) {
-      console.log(`[LLM-SKIP] ${agent.name} (${agent.aiSystem}): retry also failed — skipping cycle`);
-      return null;
-    }
+    console.log(`[LLM-SKIP] ${agent.name} (${agent.aiSystem}): no response — skipping cycle`);
+    return null;
   }
   // Mark education as delivered after first successful response
   if (isFirst) {

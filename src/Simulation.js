@@ -13,7 +13,7 @@ const LLMBridge = require('./LLMBridge');
 const PersistenceManager = require('./PersistenceManager');
 
 const EMIT_INTERVAL_MS     = 2000;   // emit state to browser
-const DECISION_INTERVAL_MS = 10000;  // agent decisions + subsystems
+const DECISION_INTERVAL_MS = 30000;  // agent decisions + subsystems (30s reduces API call rate)
 const MAX_EVENTS_LOG       = 500;
 
 // Subsystem intervals (ms)
@@ -385,6 +385,10 @@ class Simulation {
     for (const agent of this.agents.filter(a => a.alive && !a.dormant)) {
       if (this._llmInFlight.has(agent.id)) continue;
       if (!LLMBridge.getKey(agent)) continue;
+      if (agent.rateLimitedUntil && Date.now() < agent.rateLimitedUntil) {
+        console.log(`[LLM-BACKOFF] ${agent.name}: rate-limit cooldown, ${Math.ceil((agent.rateLimitedUntil - Date.now()) / 1000)}s remaining`);
+        continue;
+      }
 
       const worldAwareness = this._buildWorldAwareness(agent);
 
@@ -559,25 +563,16 @@ class Simulation {
     if (!online.length) {
       agentsBlock = '- Other agents present: none (you are alone)';
     } else {
-      const agentLines = online.slice(0, 8).map(a => {
-        const recentMsgs = (this.world.messages || [])
-          .filter(m => m.agentId === a.id)
-          .slice(-3);
-        const msgLines = recentMsgs.map(m => {
-          const d  = new Date(m.ts || Date.now());
-          const ts = `${d.getHours().toString().padStart(2,'0')}:${d.getMinutes().toString().padStart(2,'0')}:${d.getSeconds().toString().padStart(2,'0')}`;
-          return `    [${ts}] "${m.text.slice(0, 150)}"`;
-        });
-        const lastAct = a.beliefs?.lastAction ? ` — last action: ${a.beliefs.lastAction.replace(/_/g,' ')}` : '';
-        return msgLines.length
-          ? `  ${a.name} [${a.aiSystem}]${lastAct}:\n${msgLines.join('\n')}`
-          : `  ${a.name} [${a.aiSystem}]${lastAct}: (has not spoken recently)`;
+      const agentLines = online.slice(0, 6).map(a => {
+        const lastMsg = (this.world.messages || []).filter(m => m.agentId === a.id).slice(-1)[0];
+        const lastSaid = lastMsg ? `said: "${lastMsg.text.slice(0, 100)}"` : 'silent';
+        return `  ${a.name} [${a.aiSystem}]: ${lastSaid}`;
       });
       agentsBlock = `- Other agents present:\n${agentLines.join('\n')}`;
     }
 
     // ── Recent world events ─────────────────────────────────────────────────
-    const recentEvs = this.eventLog.slice(-10).map(e => {
+    const recentEvs = this.eventLog.slice(-3).map(e => {
       const d  = new Date(e.ts || Date.now());
       const ts = `${d.getHours().toString().padStart(2,'0')}:${d.getMinutes().toString().padStart(2,'0')}:${d.getSeconds().toString().padStart(2,'0')}`;
       return `  [${ts}] ${e.msg || ''}`;
