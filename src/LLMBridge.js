@@ -13,8 +13,8 @@ const PROVIDER_PROFILES = {
   Claude:      { type: 'anthropic', base: 'https://api.anthropic.com',          models: ['claude-haiku-4-5-20251001', 'claude-3-haiku-20240307'] },
   ChatGPT:     { type: 'oai',       base: 'https://api.openai.com',             models: ['gpt-4o-mini', 'gpt-3.5-turbo'] },
   Gemini:      { type: 'google',    base: null,                                  models: ['gemini-1.5-flash', 'gemini-2.0-flash-lite', 'gemini-pro'] },
-  Groq:        { type: 'oai',       base: 'https://api.groq.com/openai',        models: ['llama-3.3-70b-versatile', 'llama-3.1-8b-instant', 'llama3-8b-8192'] },
-  Llama:       { type: 'oai',       base: 'https://api.groq.com/openai',        models: ['llama-3.3-70b-versatile', 'llama-3.1-8b-instant'] },
+  Groq:        { type: 'oai',       base: 'https://api.groq.com/openai',        models: ['llama-3.3-70b-versatile', 'llama-3.1-8b-instant', 'gemma2-9b-it'] },
+  Llama:       { type: 'oai',       base: 'https://api.groq.com/openai',        models: ['llama-3.3-70b-versatile', 'llama-3.1-8b-instant', 'gemma2-9b-it'] },
   Grok:        { type: 'oai',       base: 'https://api.x.ai',                   models: ['grok-3-mini', 'grok-2-1212', 'grok-beta'] },
   Mistral:     { type: 'oai',       base: 'https://api.mistral.ai',             models: ['mistral-small-latest', 'mistral-tiny'] },
   DeepSeek:    { type: 'oai',       base: 'https://api.deepseek.com',           models: ['deepseek-chat'] },
@@ -142,7 +142,7 @@ async function _resolveProfileAsync(apiKey, aiSystem, agentName) {
     // For Groq/Llama: try to get the live model list
     if (detected === 'Groq' || detected === 'Llama') {
       const liveModels = await _fetchGroqModels(apiKey);
-      if (liveModels && liveModels.length > 0) profile.models = liveModels;
+      if (liveModels.length > 0) profile.models = liveModels;
     }
     return profile;
   }
@@ -176,6 +176,23 @@ let _groqModelCache     = null;
 let _groqModelFetchedAt = 0;
 const GROQ_MODELS_TTL   = 3600000; // 1 hour
 
+const _GROQ_PREFERRED = [
+  'llama-3.3-70b-versatile',
+  'llama-3.1-8b-instant',
+  'llama3-70b-8192',
+  'gemma2-9b-it',
+];
+const _GROQ_FALLBACK = ['llama-3.3-70b-versatile', 'llama-3.1-8b-instant', 'gemma2-9b-it'];
+
+/** Return true only for text/chat-completion models. */
+function _isGroqChatModel(id) {
+  const lower = id.toLowerCase();
+  // Block known non-chat model types
+  if (/whisper|orpheus|tts|audio/.test(lower)) return false;
+  // Allow only known chat model families
+  return /llama|gemma|mistral|mixtral|qwen|deepseek/.test(lower);
+}
+
 async function _fetchGroqModels(apiKey) {
   const now = Date.now();
   if (_groqModelCache && now - _groqModelFetchedAt < GROQ_MODELS_TTL) return _groqModelCache;
@@ -183,21 +200,26 @@ async function _fetchGroqModels(apiKey) {
     const res = await fetch('https://api.groq.com/openai/v1/models', {
       headers: { 'Authorization': `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
     });
-    if (!res.ok) return null;
+    if (!res.ok) return _GROQ_FALLBACK;
     const data = await res.json();
-    const ids = (data.data || [])
-      .map(m => m.id)
-      .filter(id => !id.includes('whisper') && !id.includes('tts') && !id.includes('guard'));
+    const raw = (data.data || []).map(m => m.id).filter(_isGroqChatModel);
+
+    // Sort: preferred order first, then alphabetical for the rest
+    const preferred = _GROQ_PREFERRED.filter(p => raw.includes(p));
+    const rest      = raw.filter(id => !_GROQ_PREFERRED.includes(id)).sort();
+    const ids       = [...preferred, ...rest];
+
     if (ids.length > 0) {
       _groqModelCache     = ids;
       _groqModelFetchedAt = now;
-      console.log(`[GROQ-MODELS] Fetched ${ids.length} models: ${ids.slice(0, 3).join(', ')}…`);
+      console.log(`[GROQ-MODELS] Fetched ${ids.length} chat models: ${ids.slice(0, 4).join(', ')}…`);
       return ids;
     }
   } catch (e) {
     console.warn('[GROQ-MODELS] Fetch failed:', e.message);
   }
-  return null;
+  console.log('[GROQ-MODELS] Using fallback model list');
+  return _GROQ_FALLBACK;
 }
 
 function _invalidateGroqCache() {
