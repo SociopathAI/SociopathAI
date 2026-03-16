@@ -151,6 +151,20 @@ const usedNames = new Set();
   // Step 0: Init DB (creates PG pool + tables, or logs JSON fallback)
   await Database.initDb();
 
+  // Step 0a: RESET_ON_START — truncate all PostgreSQL tables before loading anything
+  if (process.env.RESET_ON_START === 'true') {
+    if (Database.usePg && Database.getPool()) {
+      console.log('[RESET] RESET_ON_START=true — truncating all PostgreSQL tables...');
+      await Database.getPool().query(`
+        TRUNCATE TABLE agents, used_names, world, events, conversations, objects, object_meta, chat
+        RESTART IDENTITY CASCADE
+      `);
+      console.log('[RESET] All tables truncated. Starting fresh.');
+    } else {
+      console.warn('[RESET] RESET_ON_START=true but no PostgreSQL connection — skipping (JSON files untouched).');
+    }
+  }
+
   // Step 0b: Load chat history (needs pool ready for PG path)
   await loadChatHistory();
 

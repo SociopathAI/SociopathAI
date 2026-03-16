@@ -74,7 +74,8 @@
       "Bash(cmd.exe /c \"netstat -ano | findstr :3000\" 2>&1)",
       "Bash(find:*)",
       "Bash(ls:*)",
-      "Bash(echo:*)"
+      "Bash(echo:*)",
+      "Bash(which railway:*)"
     ]
   }
 }
