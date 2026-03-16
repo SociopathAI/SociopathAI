@@ -603,26 +603,26 @@ class Simulation {
    * Queues if recipient is already responding to another message.
    * Guaranteed response: LLM has 5s, then a fallback acknowledgment is used.
    */
-  _deliverMessageToAgent(recipient, sender, message) {
+  _deliverMessageToAgent(recipient, sender, message, depth = 0) {
     if (!recipient.alive || recipient.dormant) return;
 
     // If recipient is already handling a message, queue this one — never drop
     if (this._msgInFlight.has(recipient.id)) {
       const q = this._msgQueue.get(recipient.id) || [];
-      q.push({ sender, message });
+      q.push({ sender, message, depth });
       this._msgQueue.set(recipient.id, q);
       return;
     }
 
-    this._fireDirectMessage(recipient, sender, message);
+    this._fireDirectMessage(recipient, sender, message, depth);
   }
 
-  _fireDirectMessage(recipient, sender, message) {
+  _fireDirectMessage(recipient, sender, message, depth = 0) {
     if (!recipient.alive) { this._drainMsgQueue(recipient); return; }
 
     const key = LLMBridge.getKey(recipient);
     const ts  = new Date().toLocaleTimeString();
-    console.log(`[${ts}] MSG ${sender.name} → ${recipient.name}: "${message.slice(0, 80)}"`);
+    console.log(`[${ts}] MSG ${sender.name} → ${recipient.name} (depth=${depth}): "${message.slice(0, 80)}"`);
 
     // No LLM key — log only the sender's message; no fabricated response
     if (!key) {
@@ -660,6 +660,10 @@ class Simulation {
               (recipient.relationships[sender.id] || 0) + 0.04));
             sender.relationships[recipient.id] = Math.max(-1, Math.min(1,
               (sender.relationships[recipient.id] || 0) + 0.02));
+            // Fire back-and-forth: sender now hears recipient's reply (max 1 round-trip)
+            if (depth < 1 && sender.alive && !sender.dormant) {
+              setTimeout(() => this._deliverMessageToAgent(sender, recipient, reply, depth + 1), 500);
+            }
           } else {
             // LLM returned empty — log only sender's message, no fabricated response
             console.log(`[${ts2}] MSG ${recipient.name}: empty response — sender message only`);
@@ -698,7 +702,7 @@ class Simulation {
     const next = q.shift();
     if (!q.length) this._msgQueue.delete(recipient.id);
     // Small delay before processing next queued message to avoid back-to-back hammering
-    setTimeout(() => this._fireDirectMessage(recipient, next.sender, next.message), 300);
+    setTimeout(() => this._fireDirectMessage(recipient, next.sender, next.message, next.depth || 0), 300);
   }
 
   _logDialoguePair(sender, recipient, message, response) {

@@ -739,7 +739,7 @@ async function respondToMessage(recipient, sender, message, convHistory) {
   const history = _formatConvHistory(convHistory);
   const lines   = [];
   if (history) lines.push(history);
-  lines.push(`${sender.name} just said to you: '${message}'. Respond however you want.`);
+  lines.push(`Right now, ${sender.name} just said to you directly: '${message}'. This is happening right now. How do you respond to what they just said?`);
   const user = lines.join('\n');
   const raw  = await _rawCall(key, recipient.aiSystem, system, user, 300, 6000);
   return _cleanResponse(raw);

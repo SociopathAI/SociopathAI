@@ -1305,21 +1305,25 @@ body {
 
 /* Truncatable text — click to expand / click again to collapse */
 .trunc-text {
+  display: block;
+  overflow: hidden;
+  max-height: 4.2em;
   cursor: pointer;
-  transition: opacity 0.2s ease;
+  transition: max-height 0.2s ease;
+  -webkit-mask-image: linear-gradient(to bottom, black 55%, transparent 100%);
+  mask-image: linear-gradient(to bottom, black 55%, transparent 100%);
 }
-.trunc-text:not([data-expanded="1"]) { opacity: 0.9; }
-.trunc-text:hover:not([data-expanded="1"]) { opacity: 1; }
-.trunc-ellipsis {
-  color: rgba(100,160,255,0.55);
-  font-size: 0.85em;
-  margin-left: 2px;
-  pointer-events: none;
-  font-style: italic;
+.trunc-text:hover {
+  -webkit-mask-image: linear-gradient(to bottom, black 40%, transparent 100%);
+  mask-image: linear-gradient(to bottom, black 40%, transparent 100%);
+}
+.trunc-text.trunc-expanded {
+  max-height: 2000px;
+  -webkit-mask-image: none;
+  mask-image: none;
 }
 .chat-bubble .trunc-text,
-.fdlg-bubble .trunc-text { display: block; }
-.chat-bubble, .fdlg-bubble { cursor: default; }
+.fdlg-bubble .trunc-text { max-height: 5em; }
 
 .ev-chevron {
   font-size: 8px; color: var(--text3);

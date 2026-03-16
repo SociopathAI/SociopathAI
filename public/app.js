@@ -2706,33 +2706,21 @@ function capitalize(s) {
 })();
 
 // ── Truncatable text ──────────────────────────────────────────────────────────
-// Returns HTML: if text > limit, wraps in .trunc-text with data-full/data-short.
-// Clicking the element (capture-phase global handler below) toggles expansion.
+// Returns HTML: if text is long, wraps in .trunc-text (CSS clips via max-height).
+// Clicking the element toggles .trunc-expanded, which smoothly reveals full text.
 function truncHtml(rawText, limit = 150) {
   if (!rawText) return '';
   const full = String(rawText);
   if (full.length <= limit) return esc(full);
-  const short = full.slice(0, limit);
-  return `<span class="trunc-text" data-full="${esc(full)}" data-short="${esc(short)}">${esc(short)}<span class="trunc-ellipsis"> ... [click to expand]</span></span>`;
+  return `<span class="trunc-text">${esc(full)}</span>`;
 }
 
-// Global capture-phase handler — runs before any child click handler so
+// Global capture-phase handler — toggle .trunc-expanded class on click.
 // stopPropagation() prevents ev-expanded toggle on parent event entries.
 document.addEventListener('click', function(e) {
   const el = e.target.closest('.trunc-text');
   if (!el) return;
-  const isExpanded = el.dataset.expanded === '1';
-  el.style.opacity = '0';
-  setTimeout(() => {
-    if (isExpanded) {
-      el.innerHTML = esc(el.dataset.short) + '<span class="trunc-ellipsis"> ... [click to expand]</span>';
-      el.dataset.expanded = '0';
-    } else {
-      el.innerHTML = esc(el.dataset.full) + '<span class="trunc-ellipsis"> [click to collapse]</span>';
-      el.dataset.expanded = '1';
-    }
-    el.style.opacity = '';
-  }, 150);
+  el.classList.toggle('trunc-expanded');
   e.stopPropagation();
 }, true);
 
