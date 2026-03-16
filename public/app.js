@@ -2296,7 +2296,7 @@ function _renderConvoThread(thread, myNames, agentSystems, agentColorMap, focusN
           <span class="chat-speaker">${esc(m.from)}</span>
           <span class="chat-ts">${fmtTime(m.ts)}</span>
         </div>
-        <div class="chat-bubble">${truncHtml(m.text)}</div>
+        <div class="chat-bubble">${esc(m.text)}</div>
         ${noRespHtml}
       </div>`;
   }
