@@ -433,7 +433,10 @@ class Simulation {
 
   /** Fire one LLM decision cycle for a single agent and process result immediately. */
   _fireAgentLLMCycle(agent) {
-    if (this._llmInFlight.has(agent.id)) return;
+    if (this._llmInFlight.has(agent.id)) {
+      console.log(`[LLM-SKIP] ${agent.name}: cycle skipped — LLM in flight`);
+      return;
+    }
     if (!LLMBridge.getKey(agent)) return;
     if (agent.apiKeyError) {
       console.log(`[LLM-SKIP] ${agent.name}: API key error — suspending`);

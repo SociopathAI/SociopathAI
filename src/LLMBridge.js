@@ -483,16 +483,48 @@ async function _singleCall(apiKey, profile, model, system, user, maxTokens, time
   }
 }
 
-// ─── Raw call: resolves provider then enqueues via per-key traffic controller ──
+// ─── Direct call: same model-iteration logic as queue callback but no cooldown/queue overhead ──
+// Used for cosmetic one-shot calls (form design, spawn status) that must not block decision queues.
 
-async function _rawCall(apiKey, aiSystem, system, user, maxTokens, timeoutMs, agentName) {
+async function _directCall(apiKey, profile, label, system, user, maxTokens, timeoutMs) {
+  const activeModels = profile.models.filter(m => !_excludedModels.has(m));
+  const fallback     = (PROVIDER_FALLBACKS[profile.name] || []).filter(m => !_excludedModels.has(m));
+  const allModels    = activeModels.length > 0
+    ? [...new Set([...activeModels, ...fallback])]
+    : fallback;
+
+  let swapCount = 0;
+  for (const model of allModels) {
+    if (swapCount > 2) break;
+    const ctx    = {};
+    const result = await _singleCall(apiKey, profile, model, system, user, maxTokens, timeoutMs, ctx);
+    if (result === _AUTH_ERROR)     return _AUTH_ERROR;
+    if (result === _RATE_LIMITED)   { swapCount++; continue; }
+    if (result === _SERVER_ERROR)   { swapCount++; continue; }
+    if (result === _NOT_CHAT_MODEL) { swapCount++; continue; }
+    if (result === _MODEL_NOT_FOUND){ swapCount++; continue; }
+    return result;
+  }
+  return null;
+}
+
+// ─── Raw call: resolves provider then enqueues via per-key traffic controller ──
+// bypassQueue=true skips serialization — for one-shot cosmetic calls (form design, spawn status)
+// that must not block agent decision cycles.
+
+async function _rawCall(apiKey, aiSystem, system, user, maxTokens, timeoutMs, agentName, bypassQueue) {
   const profile = await _resolveProfileAsync(apiKey, aiSystem, agentName);
   if (!profile) {
     console.error(`[${new Date().toLocaleTimeString()}] [LLM-FAIL] ${agentName || aiSystem}: no provider resolved — connection pending`);
     return null;
   }
 
-  // Enqueue: only ONE call per API-key-hash runs at a time; queue state (q) passed in
+  // Cosmetic / one-shot calls bypass the queue entirely — run directly with no cooldown wait
+  if (bypassQueue) {
+    return _directCall(apiKey, profile, agentName || aiSystem, system, user, maxTokens, timeoutMs);
+  }
+
+  // Enqueue: only ONE decision call per API-key-hash runs at a time; queue state (q) passed in
   return _enqueueCall(apiKey, profile.name, async (q) => {
     const label = agentName || aiSystem;
 
@@ -769,7 +801,7 @@ async function designVisualForm(agent) {
     `{"shapes":[{"type":"polygon","cx":0,"cy":0,"r":9,"sides":6,"rotation":30,"color":"#hex","opacity":0.85},...],` +
     `"primaryColor":"#hex","secondaryColor":"#hex"}`;
 
-  const text = await _rawCall(key, agent.aiSystem, system, user, 400, 14000);
+  const text = await _rawCall(key, agent.aiSystem, system, user, 400, 14000, agent.name, true);
   const obj  = _extractJSON(text);
   if (!obj || !Array.isArray(obj.shapes)) return null;
 
@@ -1245,7 +1277,7 @@ async function getSpawnStatus(agent) {
   const user   = `You have just arrived. In one sentence, declare who you are and what you intend.`;
 
   console.log(`[SPAWN-STATUS] ${agent.name} [${agent.aiSystem}] — calling LLM for status message...`);
-  const text    = await _rawCall(key, agent.aiSystem, system, user, 120, 12000);
+  const text    = await _rawCall(key, agent.aiSystem, system, user, 120, 12000, agent.name, true);
   const cleaned = text ? sanitizeForDisplay(text.trim()) : null;
 
   if (cleaned && cleaned.trim()) {
