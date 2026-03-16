@@ -22,16 +22,16 @@ const PROVIDER_PROFILES = {
   Other:       { type: 'oai',       base: 'https://api.openai.com',              models: ['gpt-4o-mini', 'gpt-3.5-turbo'] },
 };
 
-// Hardcoded safe fallbacks per provider — used when all dynamic models are exhausted
+// Hardcoded safe fallbacks per provider — NEVER DELETE, last resort when all dynamic fetches fail
 const PROVIDER_FALLBACKS = {
   Claude:      ['claude-haiku-4-5-20251001', 'claude-3-haiku-20240307'],
   ChatGPT:     ['gpt-4o-mini', 'gpt-3.5-turbo'],
   Other:       ['gpt-4o-mini', 'gpt-3.5-turbo'],
-  Gemini:      ['gemini-1.5-flash'],
+  Gemini:      ['gemini-2.0-flash', 'gemini-1.5-flash-latest', 'gemini-1.5-flash-8b-latest'],
   Groq:        ['llama-3.3-70b-versatile', 'llama-3.1-8b-instant', 'gemma2-9b-it'],
   Llama:       ['llama-3.3-70b-versatile', 'llama-3.1-8b-instant', 'gemma2-9b-it'],
   Grok:        ['grok-3-mini', 'grok-2-1212'],
-  OpenRouter:  ['meta-llama/llama-3.3-70b-instruct:free', 'google/gemma-2-9b-it:free'],
+  OpenRouter:  ['meta-llama/llama-3.3-70b-instruct:free'],
 };
 
 // ─── Free will declaration — injected into every LLM prompt ────────────────────
@@ -147,21 +147,21 @@ async function _autoProbe(apiKey, agentName) {
 
 // Async profile resolver: known keys take fast-path, unknown keys auto-probe
 async function _resolveProfileAsync(apiKey, aiSystem, agentName) {
-  // 1. Known key prefix → instant resolution
+  // 1. Known key prefix → instant resolution + dynamic model list
   const detected = _detectProviderFromKey(apiKey);
   if (detected && PROVIDER_PROFILES[detected]) {
-    const profile = { name: detected, ...PROVIDER_PROFILES[detected] };
-    // For Groq/Llama: try to get the live model list
-    if (detected === 'Groq' || detected === 'Llama') {
-      const liveModels = await _fetchGroqModels(apiKey);
-      if (liveModels.length > 0) profile.models = liveModels;
-    }
+    const profile      = { name: detected, ...PROVIDER_PROFILES[detected] };
+    const dynamicModels = await _fetchModelsForProvider(detected, apiKey);
+    if (dynamicModels.length > 0) profile.models = dynamicModels;
     return profile;
   }
 
-  // 2. Known aiSystem name → instant resolution
+  // 2. Known aiSystem name → resolution + dynamic model list
   if (PROVIDER_PROFILES[aiSystem]) {
-    return { name: aiSystem, ...PROVIDER_PROFILES[aiSystem] };
+    const profile      = { name: aiSystem, ...PROVIDER_PROFILES[aiSystem] };
+    const dynamicModels = await _fetchModelsForProvider(aiSystem, apiKey);
+    if (dynamicModels.length > 0) profile.models = dynamicModels;
+    return profile;
   }
 
   // 3. Check session-only probe cache (NEVER persisted to disk)
@@ -182,61 +182,136 @@ async function _resolveProfileAsync(apiKey, aiSystem, agentName) {
   return null;
 }
 
-// ─── Groq dynamic model cache ──────────────────────────────────────────────────
+// ─── Dynamic model cache (all providers) ──────────────────────────────────────
+// Priority: 1) Cached dynamic list, 2) Fresh dynamic fetch, 3) Hard fallback
 
-let _groqModelCache     = null;
-let _groqModelFetchedAt = 0;
-const GROQ_MODELS_TTL   = 3600000; // 1 hour
+const MODEL_CACHE_TTL = 3600000; // 1 hour
+// Map: providerName → { models: string[], fetchedAt: number }
+const _modelCache = new Map();
 
-const _GROQ_PREFERRED = [
-  'llama-3.3-70b-versatile',
-  'llama-3.1-8b-instant',
-  'llama3-70b-8192',
-  'gemma2-9b-it',
-];
-const _GROQ_FALLBACK = ['llama-3.3-70b-versatile', 'llama-3.1-8b-instant', 'gemma2-9b-it'];
+// ── Provider-specific model filters (all case-insensitive) ──
 
-/** Return true only for text/chat-completion models. */
+const _GROQ_PREFERRED = ['llama-3.3-70b-versatile', 'llama-3.1-8b-instant', 'llama3-70b-8192', 'gemma2-9b-it'];
+const _GEMINI_PREFERRED = ['gemini-2.0-flash', 'gemini-2.0-flash-lite', 'gemini-1.5-flash-latest', 'gemini-1.5-flash-8b-latest'];
+
 function _isGroqChatModel(id) {
   const lower = id.toLowerCase();
-  // Block known non-chat model types
-  if (/whisper|orpheus|tts|audio/.test(lower)) return false;
-  // Allow only known chat model families
-  return /llama|gemma|mistral|mixtral|qwen|deepseek/.test(lower);
+  if (/whisper|guard|tts|audio|embedding/.test(lower)) return false;
+  return /llama|mixtral|gemma|qwen|deepseek|mistral/.test(lower);
 }
 
-async function _fetchGroqModels(apiKey) {
-  const now = Date.now();
-  if (_groqModelCache && now - _groqModelFetchedAt < GROQ_MODELS_TTL) return _groqModelCache;
+function _isOpenAIChatModel(id) {
+  return id.toLowerCase().startsWith('gpt-');
+}
+
+function _isGeminiChatModel(model) {
+  const methods = (model.supportedGenerationMethods || []).map(m => m.toLowerCase());
+  return methods.includes('generatecontent');
+}
+
+function _isOpenRouterChatModel(id) {
+  const lower = id.toLowerCase();
+  return !/stable-diffusion|whisper|embedding|tts/.test(lower);
+}
+
+// ── Per-provider raw fetchers ──
+
+async function _fetchGroqModelsDynamic(apiKey) {
+  const res = await fetch('https://api.groq.com/openai/v1/models', {
+    headers: { 'Authorization': `Bearer ${apiKey}` },
+  });
+  if (!res.ok) return null;
+  const data = await res.json();
+  const raw  = (data.data || []).map(m => m.id).filter(_isGroqChatModel);
+  const preferred = _GROQ_PREFERRED.filter(p => raw.includes(p));
+  const rest      = raw.filter(id => !_GROQ_PREFERRED.includes(id)).sort();
+  return [...preferred, ...rest];
+}
+
+async function _fetchOpenAIModels(apiKey) {
+  const res = await fetch('https://api.openai.com/v1/models', {
+    headers: { 'Authorization': `Bearer ${apiKey}` },
+  });
+  if (!res.ok) return null;
+  const data = await res.json();
+  return (data.data || []).map(m => m.id).filter(_isOpenAIChatModel).sort();
+}
+
+async function _fetchGeminiModels(apiKey) {
+  const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models?key=${apiKey}`);
+  if (!res.ok) return null;
+  const data = await res.json();
+  const raw  = (data.models || [])
+    .filter(_isGeminiChatModel)
+    .map(m => (m.name || '').replace(/^models\//, '')); // strip "models/" prefix
+  const preferred = _GEMINI_PREFERRED.filter(p => raw.includes(p));
+  const rest      = raw.filter(id => !_GEMINI_PREFERRED.includes(id)).sort();
+  return [...preferred, ...rest];
+}
+
+async function _fetchOpenRouterModels(apiKey) {
+  const res = await fetch('https://openrouter.ai/api/v1/models', {
+    headers: { 'Authorization': `Bearer ${apiKey}`, 'HTTP-Referer': 'https://sociopathai.org' },
+  });
+  if (!res.ok) return null;
+  const data = await res.json();
+  const all  = (data.data || []).map(m => m.id).filter(_isOpenRouterChatModel);
+  const free = all.filter(id => id.toLowerCase().includes(':free'));
+  const paid = all.filter(id => !id.toLowerCase().includes(':free'));
+  return [...free, ...paid];
+}
+
+async function _fetchUnknownProviderModels(apiKey, baseUrl) {
+  const res = await fetch(`${baseUrl}/v1/models`, {
+    headers: { 'Authorization': `Bearer ${apiKey}` },
+  });
+  if (!res.ok) return null;
+  const data = await res.json();
+  return (data.data || []).map(m => m.id).filter(id => id && typeof id === 'string');
+}
+
+// ── Unified model fetcher with cache + fallback ──
+
+async function _fetchModelsForProvider(providerName, apiKey, forceRefresh) {
+  const now    = Date.now();
+  const cached = _modelCache.get(providerName);
+  if (!forceRefresh && cached && now - cached.fetchedAt < MODEL_CACHE_TTL) {
+    return cached.models;
+  }
+
+  let models = null;
   try {
-    const res = await fetch('https://api.groq.com/openai/v1/models', {
-      headers: { 'Authorization': `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
-    });
-    if (!res.ok) return _GROQ_FALLBACK;
-    const data = await res.json();
-    const raw = (data.data || []).map(m => m.id).filter(_isGroqChatModel);
-
-    // Sort: preferred order first, then alphabetical for the rest
-    const preferred = _GROQ_PREFERRED.filter(p => raw.includes(p));
-    const rest      = raw.filter(id => !_GROQ_PREFERRED.includes(id)).sort();
-    const ids       = [...preferred, ...rest];
-
-    if (ids.length > 0) {
-      _groqModelCache     = ids;
-      _groqModelFetchedAt = now;
-      console.log(`[GROQ-MODELS] Fetched ${ids.length} chat models: ${ids.slice(0, 4).join(', ')}…`);
-      return ids;
+    switch (providerName) {
+      case 'Groq':
+      case 'Llama':
+        models = await _fetchGroqModelsDynamic(apiKey); break;
+      case 'ChatGPT':
+      case 'Other':
+        models = await _fetchOpenAIModels(apiKey); break;
+      case 'Gemini':
+        models = await _fetchGeminiModels(apiKey); break;
+      case 'OpenRouter':
+        models = await _fetchOpenRouterModels(apiKey); break;
+      default: {
+        const profile = PROVIDER_PROFILES[providerName];
+        if (profile && profile.base) models = await _fetchUnknownProviderModels(apiKey, profile.base);
+      }
     }
   } catch (e) {
-    console.warn('[GROQ-MODELS] Fetch failed:', e.message);
+    console.warn(`[${providerName}] model fetch error: ${e.message}`);
   }
-  console.log('[GROQ-MODELS] Using fallback model list');
-  return _GROQ_FALLBACK;
-}
 
-function _invalidateGroqCache() {
-  _groqModelCache     = null;
-  _groqModelFetchedAt = 0;
+  if (models && models.length > 0) {
+    _modelCache.set(providerName, { models, fetchedAt: now });
+    console.log(`[${providerName}] synced ${models.length} models: ${models.slice(0, 3).join(', ')}…`);
+    return models;
+  }
+
+  const fallback = PROVIDER_FALLBACKS[providerName] || [];
+  if (fallback.length > 0) {
+    console.log(`[${providerName}] fetch failed — using fallback (${fallback.length} models)`);
+  }
+  return fallback;
 }
 
 // ─── Global key store ──────────────────────────────────────────────────────────
@@ -244,8 +319,15 @@ function _invalidateGroqCache() {
 const globalKeys = new Map();
 
 function setGlobalKey(aiSystem, key) {
-  if (key && typeof key === 'string' && key.trim()) globalKeys.set(aiSystem, key.trim());
-  else globalKeys.delete(aiSystem);
+  if (key && typeof key === 'string' && key.trim()) {
+    const k = key.trim();
+    globalKeys.set(aiSystem, k);
+    // Async startup model fetch — non-blocking, never delays server start
+    const providerName = _detectProviderFromKey(k) || aiSystem;
+    Promise.allSettled([_fetchModelsForProvider(providerName, k)]).catch(() => {});
+  } else {
+    globalKeys.delete(aiSystem);
+  }
 }
 
 function getKey(agent) {
@@ -289,7 +371,7 @@ const _keyQueues = new Map();
 
 function _ensureQueue(hash, providerName) {
   if (!_keyQueues.has(hash)) {
-    _keyQueues.set(hash, { queue: [], running: false, lastCallAt: 0, providerName, rlCount: 0 });
+    _keyQueues.set(hash, { queue: [], running: false, lastCallAt: 0, providerName, rlCount: 0, _refreshed404: false });
   }
   const q = _keyQueues.get(hash);
   q.providerName = providerName; // keep updated
@@ -439,10 +521,9 @@ async function _singleCall(apiKey, profile, model, system, user, maxTokens, time
         _excludedModels.add(model);
         return _NOT_CHAT_MODEL;
       }
-      if (/model.*(not found|doesn.t exist|unavailable|not supported)|no such model|invalid.?model/i.test(body)) {
-        console.warn(`[${ts()}] [LLM-MODEL] ${profile.name}/${model}: not available, trying next`);
-        // For Groq: invalidate model cache so we refetch next time
-        if (profile.name === 'Groq' || profile.name === 'Llama') _invalidateGroqCache();
+      if (res.status === 404 || /model.*(not found|doesn.t exist|unavailable|not supported)|no such model|invalid.?model/i.test(body)) {
+        console.warn(`[${ts()}] [LLM-MODEL] ${profile.name}/${model}: not available (HTTP ${res.status}), trying next`);
+        if (ctx) ctx.was404 = true; // signal caller to force-refresh model list
         return _MODEL_NOT_FOUND;
       }
       console.error(`[${ts()}] [LLM-FAIL] ${profile.name} [${model}]: HTTP ${res.status}: ${body.slice(0, 120)}`);
@@ -518,7 +599,8 @@ async function _directCall(apiKey, profile, label, system, user, maxTokens, time
     ? [...new Set([...activeModels, ...fallback])]
     : fallback;
 
-  let swapCount = 0;
+  let swapCount      = 0;
+  let refreshed404   = false;
   for (const model of allModels) {
     if (swapCount > 2) break;
     const ctx    = {};
@@ -527,7 +609,21 @@ async function _directCall(apiKey, profile, label, system, user, maxTokens, time
     if (result === _RATE_LIMITED)   { swapCount++; continue; }
     if (result === _SERVER_ERROR)   { swapCount++; continue; }
     if (result === _NOT_CHAT_MODEL) { swapCount++; continue; }
-    if (result === _MODEL_NOT_FOUND){ swapCount++; continue; }
+    if (result === _MODEL_NOT_FOUND) {
+      // On first 404: force-refresh model list and retry once with fresh first model
+      if (ctx.was404 && !refreshed404) {
+        refreshed404 = true;
+        console.log(`[${profile.name}] model ${model} 404 — refreshing and retrying once`);
+        const fresh = await _fetchModelsForProvider(profile.name, apiKey, true).catch(() => []);
+        const retryModel = fresh.find(m => m !== model && !_excludedModels.has(m));
+        if (retryModel) {
+          const retryCtx = {};
+          const retryResult = await _singleCall(apiKey, profile, retryModel, system, user, maxTokens, timeoutMs, retryCtx);
+          if (retryResult && typeof retryResult === 'string') return retryResult;
+        }
+      }
+      swapCount++; continue;
+    }
     return result;
   }
   return null;
@@ -586,10 +682,28 @@ async function _rawCall(apiKey, aiSystem, system, user, maxTokens, timeoutMs, ag
 
       if (result === _SERVER_ERROR)  { anyServerError = true; swapCount++; continue; }
       if (result === _NOT_CHAT_MODEL){ swapCount++; continue; }
-      if (result === _MODEL_NOT_FOUND){ swapCount++; continue; }
+      if (result === _MODEL_NOT_FOUND) {
+        // On first 404: force-refresh model list and retry once with first fresh model
+        if (ctx.was404 && !q._refreshed404) {
+          q._refreshed404 = true;
+          console.log(`[${profile.name}] model ${model} 404 — refreshing and retrying once`);
+          const fresh = await _fetchModelsForProvider(profile.name, apiKey, true).catch(() => []);
+          const retryModel = fresh.find(m => m !== model && !_excludedModels.has(m));
+          if (retryModel) {
+            const retryCtx = {};
+            const retryResult = await _singleCall(apiKey, profile, retryModel, system, user, maxTokens, timeoutMs, retryCtx);
+            if (retryResult && typeof retryResult === 'string') {
+              q.rlCount = 0;
+              return retryResult;
+            }
+          }
+        }
+        swapCount++; continue;
+      }
 
       // Success
-      q.rlCount = 0;  // reset consecutive-RL counter on successful call
+      q.rlCount      = 0;
+      q._refreshed404 = false; // reset for next call
       console.log(`[QUEUE] ${profile.name} [${label}]: exiting queue (${q.queue.length} still waiting)`);
       return result;
     }
