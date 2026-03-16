@@ -94,6 +94,18 @@ class Agent {
 
     // --- API connection state (true = unknown key still probing/failed) ---
     this.apiPending = false;
+
+    // --- Message queue: incoming messages from other agents (consumed each LLM cycle) ---
+    this.incomingMessages = [];   // [{from, text, ts}]
+
+    // --- Memory: LLM-generated summary of past exchanges (never includes educationNotes) ---
+    this.memorySummary = null;
+
+    // --- Rate limit exponential backoff counter ---
+    this.rateLimitBackoffCount = 0;
+
+    // --- API key error (401 received — key invalid) ---
+    this.apiKeyError = false;
   }
 
   // ── Symbol ──────────────────────────────────────────────────────────────────
@@ -337,6 +349,10 @@ Agent.restore = function restore(data) {
   agent.formModifiers       = JSON.parse(JSON.stringify(data.formModifiers || []));
   agent.statusMessage       = data.statusMessage || null;
   agent.apiPending          = false; // always reset on restore — re-keyed on reconnect
+  agent.incomingMessages    = [];
+  agent.memorySummary       = data.memorySummary || null;
+  agent.rateLimitBackoffCount = 0;
+  agent.apiKeyError         = false;
 
   return agent;
 };

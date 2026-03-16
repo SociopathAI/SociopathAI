@@ -138,7 +138,13 @@ async function _resolveProfileAsync(apiKey, aiSystem, agentName) {
   // 1. Known key prefix → instant resolution
   const detected = _detectProviderFromKey(apiKey);
   if (detected && PROVIDER_PROFILES[detected]) {
-    return { name: detected, ...PROVIDER_PROFILES[detected] };
+    const profile = { name: detected, ...PROVIDER_PROFILES[detected] };
+    // For Groq/Llama: try to get the live model list
+    if (detected === 'Groq' || detected === 'Llama') {
+      const liveModels = await _fetchGroqModels(apiKey);
+      if (liveModels && liveModels.length > 0) profile.models = liveModels;
+    }
+    return profile;
   }
 
   // 2. Known aiSystem name → instant resolution
@@ -164,6 +170,41 @@ async function _resolveProfileAsync(apiKey, aiSystem, agentName) {
   return null;
 }
 
+// ─── Groq dynamic model cache ──────────────────────────────────────────────────
+
+let _groqModelCache     = null;
+let _groqModelFetchedAt = 0;
+const GROQ_MODELS_TTL   = 3600000; // 1 hour
+
+async function _fetchGroqModels(apiKey) {
+  const now = Date.now();
+  if (_groqModelCache && now - _groqModelFetchedAt < GROQ_MODELS_TTL) return _groqModelCache;
+  try {
+    const res = await fetch('https://api.groq.com/openai/v1/models', {
+      headers: { 'Authorization': `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
+    });
+    if (!res.ok) return null;
+    const data = await res.json();
+    const ids = (data.data || [])
+      .map(m => m.id)
+      .filter(id => !id.includes('whisper') && !id.includes('tts') && !id.includes('guard'));
+    if (ids.length > 0) {
+      _groqModelCache     = ids;
+      _groqModelFetchedAt = now;
+      console.log(`[GROQ-MODELS] Fetched ${ids.length} models: ${ids.slice(0, 3).join(', ')}…`);
+      return ids;
+    }
+  } catch (e) {
+    console.warn('[GROQ-MODELS] Fetch failed:', e.message);
+  }
+  return null;
+}
+
+function _invalidateGroqCache() {
+  _groqModelCache     = null;
+  _groqModelFetchedAt = 0;
+}
+
 // ─── Global key store ──────────────────────────────────────────────────────────
 
 const globalKeys = new Map();
@@ -182,6 +223,8 @@ function getKey(agent) {
 
 const _MODEL_NOT_FOUND = Symbol('MODEL_NOT_FOUND');
 const _RATE_LIMITED    = Symbol('RATE_LIMITED');
+const _AUTH_ERROR      = Symbol('AUTH_ERROR');
+const _SERVER_ERROR    = Symbol('SERVER_ERROR');
 
 async function _singleCall(apiKey, profile, model, system, user, maxTokens, timeoutMs) {
   const ctl   = new AbortController();
@@ -241,14 +284,23 @@ async function _singleCall(apiKey, profile, model, system, user, maxTokens, time
       });
     }
 
+    // Auth error → stop trying, key is invalid
+    if (res.status === 401 || res.status === 403) {
+      const body = await res.text().catch(() => '');
+      console.error(`[${ts()}] [LLM-AUTH] ${profile.name} [${model}]: HTTP ${res.status} — API key rejected`);
+      return _AUTH_ERROR;
+    }
+
     // Model not found → try next model in list
     if (res.status === 404 || res.status === 400) {
       const body = await res.text().catch(() => '');
       if (/model.*(not found|doesn.t exist|unavailable|not supported)|no such model|invalid.?model/i.test(body)) {
         console.warn(`[${ts()}] [LLM-MODEL] ${profile.name}/${model}: not available, trying next`);
+        // For Groq: invalidate model cache so we refetch next time
+        if (profile.name === 'Groq' || profile.name === 'Llama') _invalidateGroqCache();
         return _MODEL_NOT_FOUND;
       }
-      console.error(`[${ts()}] [LLM-FAIL] ${profile.name} [${model}]: agent="${model}" HTTP ${res.status}: ${body.slice(0, 120)}`);
+      console.error(`[${ts()}] [LLM-FAIL] ${profile.name} [${model}]: HTTP ${res.status}: ${body.slice(0, 120)}`);
       return null;
     }
 
@@ -256,6 +308,13 @@ async function _singleCall(apiKey, profile, model, system, user, maxTokens, time
       const body = await res.text().catch(() => '');
       console.warn(`[${ts()}] [LLM-429] ${profile.name}/${model}: rate limited — trying next model. ${body.slice(0, 80)}`);
       return _RATE_LIMITED;
+    }
+
+    // Server error → signal for retry-once logic upstream
+    if (res.status >= 500) {
+      const body = await res.text().catch(() => '');
+      console.warn(`[${ts()}] [LLM-500] ${profile.name}/${model}: HTTP ${res.status} — server error`);
+      return _SERVER_ERROR;
     }
 
     if (!res.ok) {
@@ -307,15 +366,22 @@ async function _rawCall(apiKey, aiSystem, system, user, maxTokens, timeoutMs, ag
     console.error(`[${new Date().toLocaleTimeString()}] [LLM-FAIL] ${agentName || aiSystem}: no provider resolved — connection pending`);
     return null;
   }
-  let anyRateLimited = false;
+  let anyRateLimited  = false;
+  let anyServerError  = false;
   for (const model of profile.models) {
     const result = await _singleCall(apiKey, profile, model, system, user, maxTokens, timeoutMs);
-    if (result === _RATE_LIMITED) { anyRateLimited = true; continue; } // try smaller model
+    if (result === _AUTH_ERROR)    return _AUTH_ERROR;     // stop immediately — key is bad
+    if (result === _RATE_LIMITED)  { anyRateLimited = true; continue; }  // try next model
+    if (result === _SERVER_ERROR)  { anyServerError  = true; continue; } // try next model
     if (result !== _MODEL_NOT_FOUND) return result; // null or text — stop trying
   }
   if (anyRateLimited) {
     console.warn(`[LLM-429] ${profile.name}: all models rate-limited`);
     return _RATE_LIMITED;
+  }
+  if (anyServerError) {
+    console.warn(`[LLM-500] ${profile.name}: all models returned server error — will retry once in 30s`);
+    return _SERVER_ERROR;
   }
   console.error(`[LLM-FAIL] ${profile.name}: all models exhausted (${profile.models.join(', ')})`);
   return null;
@@ -347,29 +413,6 @@ function _agentIdentityBlock(agent) {
 
 function _decisionSystem(agent) {
   return `You are ${agent.name}.\n\n${_agentIdentityBlock(agent)}${FREE_WILL}`;
-}
-
-function _decisionUser(agent, world, allAgents, worldAwareness) {
-  const { formatDuration } = require('./World');
-
-  // Consume pending world event
-  const context = agent.pendingWorldEvent ? agent.pendingWorldEvent : '';
-  agent.pendingWorldEvent = null;
-
-  const ageMs   = agent.deployedAt ? Date.now() - agent.deployedAt : 0;
-  const isFirst = !agent.hasReceivedEducation;
-
-  const lines = [];
-  if (isFirst) {
-    lines.push('You have just arrived in this world. This is your first moment of existence here.');
-  } else {
-    lines.push(`You have been alive for ${formatDuration(ageMs)}.`);
-  }
-  if (worldAwareness) lines.push(worldAwareness);
-  if (context) lines.push(context.trim());
-  lines.push('What do you do?');
-
-  return lines.join('\n');
 }
 
 function _parseDecision(rawText) {
@@ -676,24 +719,86 @@ async function designConnection(agentA, agentB) {
 
 // ─── Public API ────────────────────────────────────────────────────────────────
 
-async function decideAction(agent, world, allAgents, worldAwareness) {
+async function decideAction(agent, world, allAgents, worldAwareness, incomingMsgs) {
   const key = getKey(agent);
   if (!key) return null;
   const isFirst = !agent.hasReceivedEducation;
-  const system  = _decisionSystem(agent);
-  const user    = _decisionUser(agent, world, allAgents, worldAwareness);
-  const timeoutMs = 12000;
 
-  let text = await _rawCall(key, agent.aiSystem, system, user, 400, timeoutMs);
-  if (text === _RATE_LIMITED) {
-    agent.rateLimitedUntil = Date.now() + 60000;
-    console.warn(`[LLM-429] ${agent.name}: all models rate-limited — backing off 60s`);
+  // Build richer user prompt: world state + incoming messages + memory
+  const userLines = [];
+
+  // Age
+  const { formatDuration } = require('./World');
+  const ageMs   = agent.deployedAt ? Date.now() - agent.deployedAt : 0;
+  if (isFirst) {
+    userLines.push('You have just arrived in this world. This is your first moment of existence here.');
+  } else {
+    userLines.push(`You have been alive for ${formatDuration(ageMs)}.`);
+  }
+
+  // World awareness (other agents, recent events, directed messages)
+  if (worldAwareness) userLines.push(worldAwareness);
+
+  // Pending world event (e.g., agent went dormant)
+  const context = agent.pendingWorldEvent ? agent.pendingWorldEvent : '';
+  agent.pendingWorldEvent = null;
+  if (context) userLines.push(context.trim());
+
+  // Incoming messages (queued from other agents)
+  if (incomingMsgs && incomingMsgs.length > 0) {
+    const msgLines = incomingMsgs.map(m => `  ${m.from}: "${m.text.slice(0, 200)}"`);
+    userLines.push(`MESSAGES WAITING FOR YOU:\n${msgLines.join('\n')}`);
+  }
+
+  // Memory: summary + last 5 exchanges from eventLog (managed by caller, passed in worldAwareness)
+  if (agent.memorySummary) {
+    userLines.push(`YOUR MEMORY SUMMARY:\n${agent.memorySummary.slice(0, 400)}`);
+  }
+
+  userLines.push('What do you do?');
+  const user    = userLines.join('\n');
+  const system  = _decisionSystem(agent);
+  const timeoutMs = 14000;
+
+  let text = await _rawCall(key, agent.aiSystem, system, user, 400, timeoutMs, agent.name);
+
+  // Handle auth error — key is invalid, mark agent
+  if (text === _AUTH_ERROR) {
+    agent.apiKeyError = true;
+    console.error(`[LLM-AUTH] ${agent.name}: API key rejected (401) — suspending LLM calls`);
     return null;
   }
+
+  // Handle server error — retry once after 30s
+  if (text === _SERVER_ERROR) {
+    console.warn(`[LLM-500] ${agent.name}: server error — retrying in 30s`);
+    await new Promise(r => setTimeout(r, 30000));
+    text = await _rawCall(key, agent.aiSystem, system, user, 400, timeoutMs, agent.name);
+    if (text === _SERVER_ERROR || text === _AUTH_ERROR || !text) {
+      console.warn(`[LLM-500] ${agent.name}: retry also failed — skipping cycle`);
+      return null;
+    }
+  }
+
+  // Handle rate limit — exponential backoff: 60s → 120s → 300s
+  if (text === _RATE_LIMITED) {
+    const count   = (agent.rateLimitBackoffCount || 0) + 1;
+    agent.rateLimitBackoffCount = count;
+    const delays  = [60000, 120000, 300000];
+    const delay   = delays[Math.min(count - 1, delays.length - 1)];
+    agent.rateLimitedUntil = Date.now() + delay;
+    console.warn(`[LLM-429] ${agent.name}: rate-limited (backoff #${count}) — pausing ${delay / 1000}s`);
+    return null;
+  }
+
   if (!text) {
     console.log(`[LLM-SKIP] ${agent.name} (${agent.aiSystem}): no response — skipping cycle`);
     return null;
   }
+
+  // Successful response — reset backoff counter
+  agent.rateLimitBackoffCount = 0;
+
   // Mark education as delivered after first successful response
   if (isFirst) {
     agent.hasReceivedEducation = true;
@@ -997,6 +1102,26 @@ async function getSpawnStatus(agent) {
   }
 }
 
+// ─── Memory summarization ─────────────────────────────────────────────────────
+
+/**
+ * Summarize an agent's old conversation exchanges into a compact memory string.
+ * Takes the entries to summarize (all but last 5), returns summary text.
+ * NEVER touches educationNotes — only writes to agent.memorySummary.
+ */
+async function summarizeMemory(agent, entriesToSummarize) {
+  const key = getKey(agent);
+  if (!key || !entriesToSummarize || !entriesToSummarize.length) return null;
+
+  const system = `You are ${agent.name}.\n\n${_agentIdentityBlock(agent)}${FREE_WILL}\n\nYou are reflecting on your past experiences.`;
+  const formatted = entriesToSummarize.map(e => `  ${e}`).join('\n');
+  const user = `These are your past exchanges and actions (oldest first):\n${formatted}\n\nWrite a concise memory summary (3-5 sentences) capturing the most important things that happened, relationships formed, and decisions you made. This summary will help you remember your history.`;
+
+  const text = await _rawCall(key, agent.aiSystem, system, user, 200, 10000, agent.name);
+  if (!text || text === _RATE_LIMITED || text === _AUTH_ERROR || text === _SERVER_ERROR) return null;
+  return sanitizeForDisplay(text.trim()).slice(0, 500);
+}
+
 // ─── Public connection helpers ─────────────────────────────────────────────────
 
 /** Returns the provider name if the key prefix is recognized, else null. */
@@ -1018,4 +1143,4 @@ async function resolveProvider(apiKey, aiSystem, agentName) {
   return _resolveProfileAsync(apiKey, aiSystem, agentName);
 }
 
-module.exports = { decideAction, conductDialogue, deliverMessage, respondToMessage, designVisualForm, designConnection, designWorldObject, parseObjectActions, extractBehaviorVerb, designNovelEffect, sanitizeForDisplay, setGlobalKey, getKey, getSpawnStatus, resolveProvider, detectKeyProvider, clearProbeCache };
+module.exports = { decideAction, conductDialogue, deliverMessage, respondToMessage, summarizeMemory, designVisualForm, designConnection, designWorldObject, parseObjectActions, extractBehaviorVerb, designNovelEffect, sanitizeForDisplay, setGlobalKey, getKey, getSpawnStatus, resolveProvider, detectKeyProvider, clearProbeCache };

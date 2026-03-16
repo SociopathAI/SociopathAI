@@ -406,8 +406,7 @@ app.post('/api/agent', (req, res) => {
     agent.keyHash = hash;
   }
 
-  // Fire first LLM round immediately so agent has a decision ready for tick 1
-  sim._fireLLMRound();
+  // Agent timer is started by addAgent() — nothing to do here
 
   res.json({ success: true, agent: agent.getSummary() });
 });
@@ -458,7 +457,7 @@ app.post('/api/agent/reconnect', (req, res) => {
     sim.wakeAgent(agent, trimmedKey);
   }
 
-  sim._fireLLMRound();
+  // wakeAgent() starts the per-agent timer — nothing extra needed
 
   res.json({
     found:   true,
@@ -482,8 +481,12 @@ app.post('/api/sim/set-key', (req, res) => {
     return res.status(400).json({ error: 'apiKey must be a string' });
   }
   LLMBridge.setGlobalKey(aiSystem, apiKey.trim() || null);
-  // Fire LLM round immediately so newly-keyed agents start making decisions
-  if (apiKey.trim()) sim._fireLLMRound();
+  // Start timers for any alive agents that now have a key but no running timer
+  if (apiKey.trim()) {
+    for (const agent of sim.agents.filter(a => a.alive && !a.dormant && LLMBridge.getKey(a))) {
+      if (!sim._agentTimers.has(agent.id)) sim._startAgentTimer(agent);
+    }
+  }
   res.json({ success: true, aiSystem });
 });
 

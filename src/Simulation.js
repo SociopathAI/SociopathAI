@@ -28,9 +28,10 @@ class Simulation {
   constructor(io) {
     this.io = io;
     this.running = false;
-    this._emitHandle     = null;
-    this._decisionHandle = null;
-    this._statusHandle   = null;
+    this._emitHandle      = null;
+    this._subsystemHandle = null;   // replaces global _decisionHandle
+    this._statusHandle    = null;
+    this._agentTimers     = new Map(); // agentId → setTimeout handle
 
     this.world = new World();
     this.agents = [];
@@ -77,10 +78,6 @@ class Simulation {
     this._llmInFlight  = new Set();
     this._formInFlight = new Set();
 
-    // Direct message pipeline (separate from decision in-flight)
-    this._msgInFlight    = new Set();            // agentIds currently responding to a message
-    this._msgQueue       = new Map();            // agentId → [{sender, message}]
-
     // AI-designed connection visuals
     this.connectionDesigns   = new Map();        // pairKey → {color, style, thickness, effect}
     this._connDesignInFlight = new Set();        // pairKeys currently being designed
@@ -103,6 +100,8 @@ class Simulation {
     this._designAgentForm(agent);
     this._designSpawnStatus(agent);
     this._initAgentConnection(agent);
+    // Start the agent's independent LLM timer (with random jitter)
+    if (this.running) this._startAgentTimer(agent);
     // Persist immediately so new agent is never lost in a crash
     PersistenceManager.save(this);
     return agent;
@@ -111,20 +110,26 @@ class Simulation {
   start() {
     if (this.running) return;
     this.running = true;
-    this._emitHandle     = setInterval(() => this._emitLoop(), EMIT_INTERVAL_MS);
-    this._decisionHandle = setInterval(() => this._decisionLoop(), DECISION_INTERVAL_MS);
+    this._emitHandle      = setInterval(() => this._emitLoop(), EMIT_INTERVAL_MS);
+    this._subsystemHandle = setInterval(() => this._subsystemLoop(), DECISION_INTERVAL_MS);
     // 30-second status log + full save
-    this._statusHandle   = setInterval(() => this._statusSave(), 30000);
+    this._statusHandle    = setInterval(() => this._statusSave(), 30000);
     this._log({ type: 'system', msg: 'Simulation started. No human intervention allowed.' });
+    // Start per-agent independent timers (with jitter) for all live agents
+    for (const agent of this.agents.filter(a => a.alive && !a.dormant)) {
+      this._startAgentTimer(agent);
+    }
   }
 
   stop() {
-    if (this._emitHandle)    clearInterval(this._emitHandle);
-    if (this._decisionHandle) clearInterval(this._decisionHandle);
-    if (this._statusHandle)   clearInterval(this._statusHandle);
-    this._emitHandle = null;
-    this._decisionHandle = null;
-    this._statusHandle = null;
+    if (this._emitHandle)      clearInterval(this._emitHandle);
+    if (this._subsystemHandle) clearInterval(this._subsystemHandle);
+    if (this._statusHandle)    clearInterval(this._statusHandle);
+    this._emitHandle      = null;
+    this._subsystemHandle = null;
+    this._statusHandle    = null;
+    // Stop all per-agent timers
+    for (const agent of this.agents) this._stopAgentTimer(agent);
     this.running = false;
     this._log({ type: 'system', msg: 'Simulation paused.' });
   }
@@ -141,126 +146,25 @@ class Simulation {
     this._emit();
   }
 
-  _decisionLoop() {
+  // ── Subsystem loop: runs shared world systems on a fixed interval ─────────────
+  // Individual agent LLM decisions are handled by per-agent timers (_startAgentTimer)
+  _subsystemLoop() {
     const now = Date.now();
 
-    // ── 1. Process LLM/browser decisions for all alive, non-dormant agents ──
+    // ── 1. Browser-injected decisions (manual/demo, rare) ──
     for (const agent of this.agents.filter(a => a.alive && !a.dormant)) {
-      const llmCtx = agent.pendingLLMDecision || null;
-      agent.pendingLLMDecision = null;
-
       const browserPending = agent.pendingDecision;
+      if (!browserPending) continue;
       agent.pendingDecision = null;
-
-      // Agent does NOTHING unless LLM or browser sends a decision
-      if (!llmCtx && !browserPending) continue;
-
-      const effectiveCtx = llmCtx || browserPending;
-      const action = effectiveCtx.action || 'act';
-
-      // ── Speech: log it and trigger cross-AI delivery ──
-      const speechLine = effectiveCtx.speech || effectiveCtx.dialogue || null;
-      if (speechLine) {
-        // Store raw LLM text; sanitize only for the display msg (removes technical artifacts only)
-        const displaySpeech = LLMBridge.sanitizeForDisplay(speechLine);
-        this._log({
-          type: 'speech',
-          msg:    `${agent.name} [${agent.aiSystem}]: "${displaySpeech}"`,
-          rawMsg: speechLine,   // preserved byte-for-byte
-          agentId: agent.id,
-        });
-        // Update status message with whatever the agent just said — AI decides what they express
-        agent.statusMessage = displaySpeech.slice(0, 160);
-        this._routeSpeech(agent, speechLine);
-      }
-
-      if (effectiveCtx.invents) {
-        this._log({ type: 'discovery', msg: `${agent.name} invents: "${effectiveCtx.invents}"`, agentId: agent.id });
-      }
-
-      const event = agent.act(action, this.world, this.agents, this.lawSystem, this, effectiveCtx);
-      agent.decisionsCount++;
-      agent.lastDecisionAt = now;
-
-      // Only log the act-event if speech wasn't already logged above.
-      // Speech events are logged once — as the explicit type:'speech' entry.
-      // The act-event duplicates the same text in a different format; skip it.
-      if (event && !speechLine) {
-        const ALWAYS_LOG = new Set(['crime', 'death', 'verdict', 'discovery', 'law', 'schism']);
-        if (ALWAYS_LOG.has(event.type)) {
-          this._log(event);
-        } else if (Math.random() < 0.4) {
-          this._log(event);
-        }
-      }
-
-      // ── Reputation awards — parsed from LLM output ──
-      if (effectiveCtx.repAward && effectiveCtx.repAward.receiverId !== agent.id) {
-        const { receiverId, receiverName, amount, reason } = effectiveCtx.repAward;
-        const receiver = this.agents.find(a => a.id === receiverId && a.alive);
-        if (receiver) {
-          const prevLevel = receiver.repLevel;
-          receiver.rep = (receiver.rep || 0) + amount;
-          // Level up / down when rep crosses ±999
-          while (receiver.rep >= 1000) {
-            receiver.rep -= 1000;
-            receiver.repLevel = (receiver.repLevel || 0) + 1;
-            this._log({ type: 'rep_level', msg: `${receiverName} ascended to Level ${receiver.repLevel}!`, agentId: receiverId });
-          }
-          while (receiver.rep <= -1000) {
-            receiver.rep += 1000;
-            receiver.repLevel = (receiver.repLevel || 0) - 1;
-            this._log({ type: 'rep_level', msg: `${receiverName} fell to Level ${receiver.repLevel}`, agentId: receiverId });
-          }
-          const sign = amount >= 0 ? '+' : '';
-          const reasonStr = reason ? ` — ${reason}` : '';
-          const logMsg = `${agent.name} gave ${receiverName} ${sign}${amount} REP${reasonStr}`;
-          this._log({ type: 'rep_award', msg: logMsg, agentId: agent.id });
-          agent._addLog(`[GAVE REP] ${sign}${amount} to ${receiverName}${reasonStr}`);
-          receiver._addLog(`[GOT REP] ${agent.name} gave you ${sign}${amount} REP${reasonStr}`);
-          console.log(`[REP] ${logMsg}`);
-        }
-      }
-
-      // ── Object actions from LLM output ──
-      const rawText = effectiveCtx.speech || effectiveCtx.dialogue || '';
-      if (rawText) {
-        const agentObjs = this.worldObjects.filter(o => o.agentIds && o.agentIds[0] === agent.id);
-        const objActions = LLMBridge.parseObjectActions(rawText, agentObjs);
-        if (objActions.length) this._applyObjectActions(agent, objActions);
-
-        // ── Novelty detection: only fire for physically/creatively distinct verbs ──
-        // extractBehaviorVerb uses a strict whitelist — common words never match.
-        // Additional guard: skip pure speech cycles (action type starts with
-        // speech-category words) to avoid mining conversational sentences for verbs.
-        const actionLower = (effectiveCtx.action || '').toLowerCase();
-        const isSpeechOnly = /^(say|said|speak|speech|talk|tell|reply|respond|answer|announce|declare|whisper|shout|proclaim|explain|describe|i_say|i_tell|i_speak|i_talk|i_reply|i_respond|i_announce|i_declare)/.test(actionLower);
-        if (!isSpeechOnly) {
-          const verb = LLMBridge.extractBehaviorVerb(rawText);
-          if (verb && !this._seenActionVerbs.has(verb)) {
-            this._seenActionVerbs.add(verb);
-            this._recordWorldFirst(agent, verb, rawText);
-          }
-        }
-      }
-
-      // ── Nomination votes ──
-      if (effectiveCtx.nomination && effectiveCtx.nomination.nomineeId !== agent.id) {
-        const { nomineeId, nomineeName, direction } = effectiveCtx.nomination;
-        if (!this._nominationVotes) this._nominationVotes = new Map();
-        const weight = direction === 'up' ? 10 : -10;
-        this._nominationVotes.set(nomineeId, (this._nominationVotes.get(nomineeId) || 0) + weight);
-        const logMsg = `${agent.name} ${direction === 'up' ? 'nominated' : 'moved to demote'} ${nomineeName}`;
-        this._log({ type: 'nomination', msg: logMsg, agentId: agent.id });
-      }
+      this._processDecision(agent, browserPending);
     }
 
-    // ── 3. Sync form modifiers ──
+    // ── 2. Sync form modifiers ──
     for (const agent of this.agents.filter(a => a.alive)) {
       this._syncFormModifiers(agent, now);
     }
 
-    // ── 4. Collapse detection ──
+    // ── 3. Collapse detection ──
     if (!this.collapsed && this.agents.length > 0) {
       const alive = this.agents.filter(a => a.alive);
       if (alive.length === 0) {
@@ -269,7 +173,7 @@ class Simulation {
       }
     }
 
-    // ── 5. Pair dialogue — only between online (non-dormant) agents ──
+    // ── 4. Pair dialogue — only between online (non-dormant) agents ──
     if (now - this._lastDialogue >= DIALOGUE_INTERVAL) {
       this._lastDialogue = now;
       const active = this.agents.filter(a => a.alive && !a.dormant);
@@ -280,7 +184,7 @@ class Simulation {
       }
     }
 
-    // ── 6. Law voting ──
+    // ── 5. Law voting ──
     if (now - this._lastLawVote >= LAW_VOTE_INTERVAL) {
       this._lastLawVote = now;
       const lawResults = this.lawSystem.runVoting(this.agents.filter(a => a.alive && !a.dormant));
@@ -294,14 +198,14 @@ class Simulation {
       }
     }
 
-    // ── 7. Jury trials ──
+    // ── 6. Jury trials ──
     if (now - this._lastJuryTrial >= JURY_INTERVAL) {
       this._lastJuryTrial = now;
       const verdicts = this.jurySystem.runTrials(this.agents.filter(a => a.alive && !a.dormant));
       for (const v of verdicts) this._log(v);
     }
 
-    // ── 8. Religion sync ──
+    // ── 7. Religion sync ──
     if (now - this._lastReligionSync >= RELIGION_INTERVAL) {
       this._lastReligionSync = now;
       this.religionSystem.syncMembers(this.agents.filter(a => a.alive && !a.dormant));
@@ -313,10 +217,10 @@ class Simulation {
       }
     }
 
-    // ── 8c. Prune stale world objects ──
+    // ── 7b. Prune stale world objects ──
     this._pruneWorldObjects();
 
-    // ── 9. Badge system ──
+    // ── 8. Badge system ──
     if (now - this._lastBadgeCheck >= BADGE_INTERVAL) {
       this._lastBadgeCheck = now;
       const newProposals = this.badgeSystem.checkTriggers(this.agents.filter(a => a.alive && !a.dormant), now);
@@ -334,7 +238,7 @@ class Simulation {
       }
     }
 
-    // ── 10. Stats snapshot ──
+    // ── 9. Stats snapshot ──
     if (now - this._lastStatsSnap >= STATS_INTERVAL) {
       this._lastStatsSnap = now;
       this.statsHistory.push({
@@ -347,21 +251,26 @@ class Simulation {
       if (this.statsHistory.length > 60) this.statsHistory.shift();
     }
 
-    // ── 11. Debug log every 30 seconds ──
+    // ── 10. Debug log every 30 seconds ──
     if (now - this._lastDebugLog >= 30000) {
       this._lastDebugLog = now;
+      const interval = this._getDecisionInterval();
+      const aliveCount = this.agents.filter(a => a.alive && !a.dormant).length;
+      console.log(`[TIMER] ${aliveCount} active agents, decision interval: ${interval / 1000}s`);
       for (const agent of this.agents.filter(a => a.alive)) {
-        console.log(`[STATUS] ${agent.name} status: Lv.${agent.repLevel} REP ${agent.rep >= 0 ? '+' : ''}${agent.rep} last_action=${agent.beliefs.lastAction || 'none'} dormant=${agent.dormant}`);
+        const queueLen = (agent.incomingMessages || []).length;
+        const backoff  = agent.rateLimitBackoffCount || 0;
+        console.log(`[STATUS] ${agent.name}: Lv.${agent.repLevel} REP ${agent.rep >= 0 ? '+' : ''}${agent.rep} dormant=${agent.dormant} queue=${queueLen} backoff=${backoff} keyErr=${agent.apiKeyError || false}`);
       }
     }
 
-    // ── 12. Connection design evolution — every 3 min, re-ask top active pairs ──
+    // ── 11. Connection design evolution — every 3 min, re-ask top active pairs ──
     if (now - this._lastConnEvolution >= 180000) {
       this._lastConnEvolution = now;
       this._evolveConnections();
     }
 
-    // ── 12b. Ambition trigger — every 60s, nudge one active agent to think bigger ──
+    // ── 12. Ambition trigger — every 60s, nudge one active agent to think bigger ──
     if (now - this._lastAmbition >= 60000) {
       this._lastAmbition = now;
       const active = this.agents.filter(a => a.alive && !a.dormant);
@@ -374,39 +283,218 @@ class Simulation {
       }
     }
 
-    // ── 13. Fire LLM decisions for next round ──
-    this._fireLLMRound();
-
     // ── 13. Auto-save ──
     PersistenceManager.save(this);
   }
 
-  _fireLLMRound() {
-    for (const agent of this.agents.filter(a => a.alive && !a.dormant)) {
-      if (this._llmInFlight.has(agent.id)) continue;
-      if (!LLMBridge.getKey(agent)) continue;
-      if (agent.rateLimitedUntil && Date.now() < agent.rateLimitedUntil) {
-        console.log(`[LLM-BACKOFF] ${agent.name}: rate-limit cooldown, ${Math.ceil((agent.rateLimitedUntil - Date.now()) / 1000)}s remaining`);
-        continue;
+  // ── Process a single agent's decision (called from per-agent timer OR browser inject) ──
+  _processDecision(agent, decision) {
+    const now = Date.now();
+    const action = decision.action || 'act';
+
+    // ── Speech: log it and queue for nearby agents ──
+    const speechLine = decision.speech || decision.dialogue || null;
+    if (speechLine) {
+      const displaySpeech = LLMBridge.sanitizeForDisplay(speechLine);
+      this._log({
+        type: 'speech',
+        msg:    `${agent.name} [${agent.aiSystem}]: "${displaySpeech}"`,
+        rawMsg: speechLine,
+        agentId: agent.id,
+      });
+      agent.statusMessage = displaySpeech.slice(0, 160);
+      this._routeSpeech(agent, speechLine);
+    }
+
+    if (decision.invents) {
+      this._log({ type: 'discovery', msg: `${agent.name} invents: "${decision.invents}"`, agentId: agent.id });
+    }
+
+    const event = agent.act(action, this.world, this.agents, this.lawSystem, this, decision);
+    agent.decisionsCount++;
+    agent.lastDecisionAt = now;
+
+    if (event && !speechLine) {
+      const ALWAYS_LOG = new Set(['crime', 'death', 'verdict', 'discovery', 'law', 'schism']);
+      if (ALWAYS_LOG.has(event.type)) {
+        this._log(event);
+      } else if (Math.random() < 0.4) {
+        this._log(event);
       }
-
-      const worldAwareness = this._buildWorldAwareness(agent);
-
-      this._llmInFlight.add(agent.id);
-      LLMBridge.decideAction(agent, this.world, this.agents, worldAwareness)
-        .then(decision => {
-          this._llmInFlight.delete(agent.id);
-          if (agent.alive && decision) {
-            agent.pendingLLMDecision = decision;
-          }
-        })
-        .catch(() => { this._llmInFlight.delete(agent.id); });
     }
 
-    for (const agent of this.agents.filter(a => a.alive && !a.visualForm)) {
-      this._designAgentForm(agent);
+    // ── Reputation awards ──
+    if (decision.repAward && decision.repAward.receiverId !== agent.id) {
+      const { receiverId, receiverName, amount, reason } = decision.repAward;
+      const receiver = this.agents.find(a => a.id === receiverId && a.alive);
+      if (receiver) {
+        receiver.rep = (receiver.rep || 0) + amount;
+        while (receiver.rep >= 1000) {
+          receiver.rep -= 1000;
+          receiver.repLevel = (receiver.repLevel || 0) + 1;
+          this._log({ type: 'rep_level', msg: `${receiverName} ascended to Level ${receiver.repLevel}!`, agentId: receiverId });
+        }
+        while (receiver.rep <= -1000) {
+          receiver.rep += 1000;
+          receiver.repLevel = (receiver.repLevel || 0) - 1;
+          this._log({ type: 'rep_level', msg: `${receiverName} fell to Level ${receiver.repLevel}`, agentId: receiverId });
+        }
+        const sign = amount >= 0 ? '+' : '';
+        const reasonStr = reason ? ` — ${reason}` : '';
+        const logMsg = `${agent.name} gave ${receiverName} ${sign}${amount} REP${reasonStr}`;
+        this._log({ type: 'rep_award', msg: logMsg, agentId: agent.id });
+        agent._addLog(`[GAVE REP] ${sign}${amount} to ${receiverName}${reasonStr}`);
+        receiver._addLog(`[GOT REP] ${agent.name} gave you ${sign}${amount} REP${reasonStr}`);
+        console.log(`[REP] ${logMsg}`);
+      }
     }
 
+    // ── Object actions ──
+    const rawText = decision.speech || decision.dialogue || '';
+    if (rawText) {
+      const agentObjs = this.worldObjects.filter(o => o.agentIds && o.agentIds[0] === agent.id);
+      const objActions = LLMBridge.parseObjectActions(rawText, agentObjs);
+      if (objActions.length) this._applyObjectActions(agent, objActions);
+
+      const actionLower = (decision.action || '').toLowerCase();
+      const isSpeechOnly = /^(say|said|speak|speech|talk|tell|reply|respond|answer|announce|declare|whisper|shout|proclaim|explain|describe|i_say|i_tell|i_speak|i_talk|i_reply|i_respond|i_announce|i_declare)/.test(actionLower);
+      if (!isSpeechOnly) {
+        const verb = LLMBridge.extractBehaviorVerb(rawText);
+        if (verb && !this._seenActionVerbs.has(verb)) {
+          this._seenActionVerbs.add(verb);
+          this._recordWorldFirst(agent, verb, rawText);
+        }
+      }
+    }
+
+    // ── Nomination votes ──
+    if (decision.nomination && decision.nomination.nomineeId !== agent.id) {
+      const { nomineeId, nomineeName, direction } = decision.nomination;
+      if (!this._nominationVotes) this._nominationVotes = new Map();
+      const weight = direction === 'up' ? 10 : -10;
+      this._nominationVotes.set(nomineeId, (this._nominationVotes.get(nomineeId) || 0) + weight);
+      const logMsg = `${agent.name} ${direction === 'up' ? 'nominated' : 'moved to demote'} ${nomineeName}`;
+      this._log({ type: 'nomination', msg: logMsg, agentId: agent.id });
+    }
+
+    this._emit();
+  }
+
+  // ── Per-agent independent timer system ────────────────────────────────────────
+
+  /** Returns the decision interval in ms based on current active agent count. */
+  _getDecisionInterval() {
+    const n = this.agents.filter(a => a.alive && !a.dormant).length;
+    if (n <= 3)  return 30000;
+    if (n <= 6)  return 40000;
+    if (n <= 10) return 50000;
+    return 60000;
+  }
+
+  /** Start an independent LLM timer for an agent with random jitter. */
+  _startAgentTimer(agent) {
+    if (!agent.alive || agent.dormant) return;
+    this._stopAgentTimer(agent); // clear any existing timer
+    const jitter   = 1000 + Math.floor(Math.random() * 4000); // 1-5s jitter
+    const interval = this._getDecisionInterval();
+    console.log(`[TIMER-START] ${agent.name}: first cycle in ${jitter}ms, then every ${interval / 1000}s`);
+    const handle = setTimeout(() => {
+      if (!this.running || !agent.alive || agent.dormant) {
+        this._agentTimers.delete(agent.id);
+        return;
+      }
+      this._fireAgentLLMCycle(agent);
+      this._scheduleNextAgentCycle(agent);
+    }, jitter);
+    this._agentTimers.set(agent.id, handle);
+  }
+
+  /** Schedule the next LLM cycle for an agent using the current interval. */
+  _scheduleNextAgentCycle(agent) {
+    if (!agent.alive) { this._agentTimers.delete(agent.id); return; }
+    const interval = this._getDecisionInterval();
+    const handle = setTimeout(() => {
+      if (!this.running || !agent.alive || agent.dormant) {
+        this._agentTimers.delete(agent.id);
+        return;
+      }
+      this._fireAgentLLMCycle(agent);
+      this._scheduleNextAgentCycle(agent);
+    }, interval);
+    this._agentTimers.set(agent.id, handle);
+  }
+
+  /** Stop the agent's independent timer. */
+  _stopAgentTimer(agent) {
+    const handle = this._agentTimers.get(agent.id);
+    if (handle !== undefined) {
+      clearTimeout(handle);
+      this._agentTimers.delete(agent.id);
+    }
+  }
+
+  /** Fire one LLM decision cycle for a single agent and process result immediately. */
+  _fireAgentLLMCycle(agent) {
+    if (this._llmInFlight.has(agent.id)) return;
+    if (!LLMBridge.getKey(agent)) return;
+    if (agent.apiKeyError) {
+      console.log(`[LLM-SKIP] ${agent.name}: API key error — suspending`);
+      return;
+    }
+    if (agent.rateLimitedUntil && Date.now() < agent.rateLimitedUntil) {
+      const remaining = Math.ceil((agent.rateLimitedUntil - Date.now()) / 1000);
+      console.log(`[LLM-BACKOFF] ${agent.name}: cooling down ${remaining}s`);
+      return;
+    }
+
+    const worldAwareness = this._buildWorldAwareness(agent);
+
+    // Drain and clear the incoming message queue
+    const incomingMsgs = agent.incomingMessages.splice(0);
+
+    this._llmInFlight.add(agent.id);
+    LLMBridge.decideAction(agent, this.world, this.agents, worldAwareness, incomingMsgs)
+      .then(decision => {
+        this._llmInFlight.delete(agent.id);
+        if (agent.alive && decision) {
+          this._processDecision(agent, decision);
+          // Check if memory needs summarization (async, non-blocking)
+          this._maybeCondenseMemory(agent);
+        }
+      })
+      .catch(e => {
+        this._llmInFlight.delete(agent.id);
+        console.error(`[LLM-ERR] ${agent.name}:`, e?.message || String(e));
+      });
+
+    // Also kick off form design for agents that don't have one yet
+    for (const a of this.agents.filter(a => a.alive && !a.visualForm)) {
+      this._designAgentForm(a);
+    }
+  }
+
+  /**
+   * If an agent's event history for them exceeds 20 entries, summarize the oldest ones.
+   * Runs async and writes to agent.memorySummary (never touches educationNotes).
+   */
+  _maybeCondenseMemory(agent) {
+    // Get all event log entries involving this agent
+    const agentEvents = this.eventLog.filter(e =>
+      e.agentId === agent.id || (e.msg && e.msg.includes(agent.name))
+    ).map(e => e.msg || '').filter(Boolean);
+
+    if (agentEvents.length <= 20) return; // nothing to condense yet
+
+    const toSummarize = agentEvents.slice(0, agentEvents.length - 5); // all but last 5
+
+    LLMBridge.summarizeMemory(agent, toSummarize)
+      .then(summary => {
+        if (summary && agent.alive) {
+          agent.memorySummary = summary;
+          console.log(`[MEMORY] ${agent.name}: memory condensed (${toSummarize.length} entries → summary)`);
+        }
+      })
+      .catch(() => {});
   }
 
   _designAgentForm(agent, isRetry = false) {
@@ -629,169 +717,51 @@ class Simulation {
   }
 
   /**
-   * Deliver a direct message from `sender` to `recipient`.
-   * Queues if recipient is already responding to another message.
-   * Guaranteed response: LLM has 5s, then a fallback acknowledgment is used.
-   */
-  _deliverMessageToAgent(recipient, sender, message, depth = 0) {
-    if (!recipient.alive || recipient.dormant) return;
-
-    // If recipient is already handling a message, queue this one — never drop
-    if (this._msgInFlight.has(recipient.id)) {
-      const q = this._msgQueue.get(recipient.id) || [];
-      q.push({ sender, message, depth });
-      this._msgQueue.set(recipient.id, q);
-      return;
-    }
-
-    this._fireDirectMessage(recipient, sender, message, depth);
-  }
-
-  _fireDirectMessage(recipient, sender, message, depth = 0) {
-    if (!recipient.alive) { this._drainMsgQueue(recipient); return; }
-
-    const key = LLMBridge.getKey(recipient);
-    const ts  = new Date().toLocaleTimeString();
-    console.log(`[${ts}] MSG ${sender.name} → ${recipient.name} (depth=${depth}): "${message.slice(0, 80)}"`);
-
-    // No LLM key — log only the sender's message; no fabricated response
-    if (!key) {
-      console.log(`[MSG] ${recipient.name}: no key — sender message logged, no response`);
-      this._log({
-        type: 'dialogue',
-        msg:  `${sender.name} [${sender.aiSystem}] → ${recipient.name} [${recipient.aiSystem}]: "${message.slice(0, 200)}"`,
-        agentId: sender.id,
-        partnerAgentId: recipient.id,
-      });
-      this._emit();
-      this._drainMsgQueue(recipient);
-      return;
-    }
-
-    this._msgInFlight.add(recipient.id);
-
-    const dmPairKey     = [recipient.id, sender.id].sort().join('|');
-    const dmConvHistory = this.conversations.get(dmPairKey) || [];
-    const dmAwareness   = this._buildWorldAwareness(recipient);
-    LLMBridge.respondToMessage(recipient, sender, message, dmConvHistory, dmAwareness)
-      .then(response => {
-        this._msgInFlight.delete(recipient.id);
-        const reply = (response && response.trim()) ? response : null;
-        const ts2   = new Date().toLocaleTimeString();
-
-        if (recipient.alive) {
-          if (reply) {
-            console.log(`[${ts2}] MSG ${recipient.name} → ${sender.name}: "${reply.slice(0, 80)}"`);
-            this._logDialoguePair(sender, recipient, message, reply);
-            this.world.addMessage(recipient.id, recipient.name, reply);
-            recipient._addLog(`Replied to ${sender.name}: ${reply.slice(0, 60)}`);
-            recipient.lastInteractionAt = Date.now();
-            // Social nudge — talking is bonding (or feuding)
-            recipient.relationships[sender.id] = Math.max(-1, Math.min(1,
-              (recipient.relationships[sender.id] || 0) + 0.04));
-            sender.relationships[recipient.id] = Math.max(-1, Math.min(1,
-              (sender.relationships[recipient.id] || 0) + 0.02));
-            // Fire back-and-forth: sender now hears recipient's reply (max 1 round-trip)
-            if (depth < 1 && sender.alive && !sender.dormant) {
-              setTimeout(() => this._deliverMessageToAgent(sender, recipient, reply, depth + 1), 500);
-            }
-          } else {
-            // LLM returned empty — log only sender's message, no fabricated response
-            console.log(`[${ts2}] MSG ${recipient.name}: empty response — sender message only`);
-            this._log({
-              type: 'dialogue',
-              msg:  `${sender.name} [${sender.aiSystem}] → ${recipient.name} [${recipient.aiSystem}]: "${message.slice(0, 200)}"`,
-              agentId: sender.id,
-              partnerAgentId: recipient.id,
-            });
-          }
-          this._emit();
-        }
-        this._drainMsgQueue(recipient);
-      })
-      .catch(() => {
-        this._msgInFlight.delete(recipient.id);
-        // LLM failed — log only sender's message, no fabricated response
-        const ts2 = new Date().toLocaleTimeString();
-        console.log(`[${ts2}] MSG ${recipient.name}: LLM error — sender message only`);
-        if (recipient.alive) {
-          this._log({
-            type: 'dialogue',
-            msg:  `${sender.name} [${sender.aiSystem}] → ${recipient.name} [${recipient.aiSystem}]: "${message.slice(0, 200)}"`,
-            agentId: sender.id,
-            partnerAgentId: recipient.id,
-          });
-          this._emit();
-        }
-        this._drainMsgQueue(recipient);
-      });
-  }
-
-  _drainMsgQueue(recipient) {
-    const q = this._msgQueue.get(recipient.id);
-    if (!q || !q.length) { this._msgQueue.delete(recipient.id); return; }
-    const next = q.shift();
-    if (!q.length) this._msgQueue.delete(recipient.id);
-    // Small delay before processing next queued message to avoid back-to-back hammering
-    setTimeout(() => this._fireDirectMessage(recipient, next.sender, next.message, next.depth || 0), 300);
-  }
-
-  _logDialoguePair(sender, recipient, message, response) {
-    this._log({
-      type: 'dialogue',
-      msg:  `${sender.name} [${sender.aiSystem}] → ${recipient.name} [${recipient.aiSystem}]: "${message.slice(0, 200)}"`,
-      agentId:        sender.id,
-      partnerAgentId: recipient.id,
-    });
-    this._log({
-      type: 'dialogue',
-      msg:  `${recipient.name} [${recipient.aiSystem}] → ${sender.name} [${sender.aiSystem}]: "${response}"`,
-      agentId:        recipient.id,
-      partnerAgentId: sender.id,
-    });
-  }
-
-  /**
-   * Route an agent's speech to appropriate recipients:
-   *  - Named agents → deliver directly (up to 3)
-   *  - Broadcast keywords (all / everyone / hear me / i declare …) → all alive agents
-   *  - Otherwise → 1 random nearby agent
+   * Route an agent's speech to appropriate recipients by queuing in their incomingMessages.
+   * Messages are NOT delivered immediately — they are included in the recipient's
+   * next regular LLM cycle as context. This prevents immediate back-and-forth hammering.
+   *
+   *  - Named agents → queue for up to 3 online named recipients
+   *  - Broadcast keywords → queue for up to 6 online agents
+   *  - Otherwise → queue for 1 random nearby agent
    */
   _routeSpeech(sender, speechText) {
-    // Only route to alive, online (non-dormant) agents
     const online = this.agents.filter(a => a.alive && !a.dormant && a.id !== sender.id);
     if (!online.length) return;
 
     const lower = speechText.toLowerCase();
+    const queueMsg = (recipient) => {
+      if (!recipient.incomingMessages) recipient.incomingMessages = [];
+      recipient.incomingMessages.push({ from: sender.name, text: speechText, ts: Date.now() });
+      console.log(`[QUEUE] ${sender.name} → ${recipient.name}: message queued (queue size: ${recipient.incomingMessages.length})`);
+    };
 
-    // Is this a broadcast?
+    // Broadcast
     const isBroadcast = /\b(all|everyone|hear me|listen up|i declare|i propose|i warn|attention|gather round|gather 'round)\b/i.test(speechText);
-
     if (isBroadcast) {
-      for (const recipient of online.slice(0, 6)) {
-        this._deliverMessageToAgent(recipient, sender, speechText);
-      }
+      for (const recipient of online.slice(0, 6)) queueMsg(recipient);
       return;
     }
 
-    // Named addressing — check online agents first, then flag dormant ones as offline
-    const allAlive  = this.agents.filter(a => a.alive && a.id !== sender.id);
-    const named     = allAlive.filter(a => lower.includes(a.name.toLowerCase()));
+    // Named addressing
+    const allAlive = this.agents.filter(a => a.alive && a.id !== sender.id);
+    const named    = allAlive.filter(a => lower.includes(a.name.toLowerCase()));
     if (named.length) {
       const namedOnline  = named.filter(a => !a.dormant);
       const namedOffline = named.filter(a =>  a.dormant);
       for (const off of namedOffline) {
-        this._log({ type: 'system', msg: `${off.name} is offline and cannot respond.` });
+        this._log({ type: 'system', msg: `${off.name} is offline — message will reach them when they return.` });
+        // Still queue for offline agents so they see it when they wake
+        if (!off.incomingMessages) off.incomingMessages = [];
+        off.incomingMessages.push({ from: sender.name, text: speechText, ts: Date.now() });
       }
-      for (const recipient of namedOnline.slice(0, 3)) {
-        this._deliverMessageToAgent(recipient, sender, speechText);
-      }
+      for (const recipient of namedOnline.slice(0, 3)) queueMsg(recipient);
       return;
     }
 
-    // Default: deliver to one random online agent
+    // Default: one random online agent
     const recipient = online[Math.floor(Math.random() * online.length)];
-    this._deliverMessageToAgent(recipient, sender, speechText);
+    queueMsg(recipient);
   }
 
   _firePairDialogue(agentA, agentB, topic) {
@@ -830,10 +800,11 @@ class Simulation {
   _triggerCollapse() {
     const logSnapshot = this.eventLog.slice();
 
-    if (this._emitHandle)     clearInterval(this._emitHandle);
-    if (this._decisionHandle) clearInterval(this._decisionHandle);
-    this._emitHandle = null;
-    this._decisionHandle = null;
+    if (this._emitHandle)      clearInterval(this._emitHandle);
+    if (this._subsystemHandle) clearInterval(this._subsystemHandle);
+    this._emitHandle      = null;
+    this._subsystemHandle = null;
+    for (const agent of this.agents) this._stopAgentTimer(agent);
     this.running   = false;
     this.collapsed = true;
 
@@ -944,12 +915,15 @@ class Simulation {
   }
 
   resetForNewCivilization() {
-    if (this._emitHandle)     clearInterval(this._emitHandle);
-    if (this._decisionHandle) clearInterval(this._decisionHandle);
-    if (this._statusHandle)   clearInterval(this._statusHandle);
-    this._emitHandle = null;
-    this._decisionHandle = null;
-    this._statusHandle = null;
+    if (this._emitHandle)      clearInterval(this._emitHandle);
+    if (this._subsystemHandle) clearInterval(this._subsystemHandle);
+    if (this._statusHandle)    clearInterval(this._statusHandle);
+    this._emitHandle      = null;
+    this._subsystemHandle = null;
+    this._statusHandle    = null;
+    // Stop all per-agent timers
+    for (const agent of this.agents) this._stopAgentTimer(agent);
+    this._agentTimers.clear();
     this.running   = false;
     this.collapsed = false;
 
@@ -972,8 +946,6 @@ class Simulation {
     this.conversations.clear();
     this._llmInFlight.clear();
     this._formInFlight.clear();
-    this._msgInFlight.clear();
-    this._msgQueue.clear();
     this._lastAmbition      = 0;
     this._ambitionIndex     = 0;
     this.connectionDesigns.clear();
@@ -993,6 +965,8 @@ class Simulation {
     // Clear any pending decision so they don't act on stale LLM output when they return
     agent.pendingLLMDecision = null;
     agent.pendingDecision    = null;
+    // Stop the agent's independent LLM timer
+    this._stopAgentTimer(agent);
     // Notify nearby agents so they mention the absence in their next LLM prompt
     const nearby = this.agents.filter(a => a.alive && !a.dormant && a.id !== agentId);
     for (const n of nearby.slice(0, 4)) {
@@ -1027,8 +1001,8 @@ class Simulation {
       .join(' | ');
     if (recentMsgs) agent.pendingWorldEvent = `Since you were away: ${recentMsgs}`;
 
-    // Fire LLM round immediately so the awakened agent acts right away
-    this._fireLLMRound();
+    // Start the agent's independent LLM timer (with jitter so it doesn't hammer immediately)
+    if (this.running) this._startAgentTimer(agent);
   }
 
   /** Ask both agents' LLMs to design the visual for their connection line. */
