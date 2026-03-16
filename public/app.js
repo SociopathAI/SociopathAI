@@ -19,6 +19,10 @@ let agentSearchQuery  = '';    // live search filter string
 let locatingAgentId   = null;  // card currently highlighted via click-to-locate
 let deceasedExpanded  = false; // whether DECEASED section is open
 let offlineExpanded   = false; // whether OFFLINE section is open
+// ── Expansion state — persists across re-renders (never reset) ──
+const expandedEvents  = new Set(); // evId → expanded in Events feed
+const expandedBubbles = new Set(); // bubbleId → expanded in Chats thread
+
 // ── Events panel state ──
 let focusAgentId  = null;   // null = global feed; agentId = agent focus mode
 let focusModeTab  = 'all';  // 'all' | 'dialogue'
@@ -1233,16 +1237,25 @@ function _buildEventNode(e, catMap) {
     ? `<details class="ev-raw-details"><summary class="ev-raw-summary">Raw AI response</summary><div class="ev-raw-body">${esc(e.rawMsg)}</div></details>`
     : '';
 
-  // Display message: truncated by default, click to expand
-  const fullMsg = e.msg || '';
-  const msgHtml = truncHtml(fullMsg);
+  // Display message: truncated by default, click to expand.
+  // Expansion state stored in expandedEvents Set so it survives re-renders.
+  const fullMsg  = e.msg || '';
+  const evId     = String(e.ts || '') + '|' + (e.type || '') + '|' + (agentId || '');
+  const EV_LIMIT = 150;
+  const _evIsExp = expandedEvents.has(evId);
 
+  function _evMsgHtml(expanded) {
+    if (fullMsg.length <= EV_LIMIT || expanded) return esc(fullMsg);
+    return `${esc(fullMsg.slice(0, EV_LIMIT))}<span class="ev-trunc-hint"> …</span>`;
+  }
+
+  div.dataset.evExpandId = evId;
   div.innerHTML = `
     <div class="ev-entry-top">
       <span class="ev-tick">${time}</span>
       <span class="ev-dot"></span>
       ${novelBadge}
-      <span class="ev-msg">${msgHtml}</span>
+      <span class="ev-msg">${_evMsgHtml(_evIsExp)}</span>
       <span class="ev-chevron">${isDlg ? '💬' : '▾'}</span>
     </div>
     <div class="ev-details">
@@ -1271,6 +1284,13 @@ function _buildEventNode(e, catMap) {
         else if (lastState) renderConversations(lastState.eventLog);
         return;
       }
+    }
+    // Toggle text expansion — update Set so state survives re-renders
+    if (fullMsg.length > EV_LIMIT) {
+      const nowExp = !expandedEvents.has(evId);
+      if (nowExp) expandedEvents.add(evId); else expandedEvents.delete(evId);
+      const msgEl = div.querySelector('.ev-msg');
+      if (msgEl) msgEl.innerHTML = _evMsgHtml(nowExp);
     }
     div.classList.toggle('ev-expanded');
   });
@@ -1739,13 +1759,16 @@ function _renderEvLogDlgThread(thread, myNames, agentSystems, agentColorMap) {
     const cs     = `--bubble-bg:color-mix(in srgb,${color} 15%,transparent);--bubble-border:color-mix(in srgb,${color} 40%,transparent);--speaker-color:${color}`;
     const isLast = i === thread.messages.length - 1;
     const noResp = (isLast && singleUnanswered) ? '<div class="chat-no-response">no response</div>' : '';
+    const bId    = String(m.ts || '') + '|' + (m.from || '');
+    const bLong  = (m.text || '').length > CB_LIMIT;
+    const bExp   = bLong && expandedBubbles.has(bId);
     bubblesHtml += `
       <div class="chat-row ${side}" style="${cs}">
         <div class="chat-meta-row">
           <span class="chat-speaker">${esc(m.from)}</span>
           <span class="chat-ts">${fmtTime(m.ts)}</span>
         </div>
-        <div class="chat-bubble${(m.text || '').length > CB_LIMIT ? ' has-more' : ''}">${chatBubbleHtml(m.text)}</div>
+        <div class="chat-bubble${bLong ? ' has-more' : ''}${bExp ? ' cb-expanded' : ''}" data-bubble-id="${esc(bId)}">${chatBubbleHtml(m.text)}</div>
         ${noResp}
       </div>`;
   }
@@ -1931,7 +1954,7 @@ function _renderFocusDlgThread(thread, agentId, agentMap) {
           <span class="fdlg-speaker" style="color:${isMine ? focusColor : partnerColor}">${esc(m.from)}</span>
           <span class="fdlg-ts">${fmtTime(m.ts)}</span>
         </div>
-        <div class="fdlg-bubble${(m.text || '').length > CB_LIMIT ? ' has-more' : ''}" ${colorAttr}>${chatBubbleHtml(m.text)}</div>
+        <div class="fdlg-bubble${(m.text || '').length > CB_LIMIT ? ' has-more' : ''}${expandedBubbles.has(String(m.ts || '') + '|' + (m.from || '')) ? ' cb-expanded' : ''}" data-bubble-id="${esc(String(m.ts || '') + '|' + (m.from || ''))}" ${colorAttr}>${chatBubbleHtml(m.text)}</div>
       </div>`;
   }
 
@@ -2289,16 +2312,19 @@ function _renderConvoThread(thread, myNames, agentSystems, agentColorMap, focusN
     const side   = isRight ? 'bubble-mine' : 'bubble-theirs';
     const color  = isRight ? colorRight : colorLeft;
     const colorStyle = `--bubble-bg:color-mix(in srgb,${color} 15%,transparent);--bubble-border:color-mix(in srgb,${color} 40%,transparent);--speaker-color:${color}`;
-    const isLast = i === thread.messages.length - 1;
+    const isLast   = i === thread.messages.length - 1;
     const noRespHtml = (isLast && singleUnanswered)
       ? '<div class="chat-no-response">no response</div>' : '';
+    const bId2  = String(m.ts || '') + '|' + (m.from || '');
+    const bLong2 = (m.text || '').length > CB_LIMIT;
+    const bExp2  = bLong2 && expandedBubbles.has(bId2);
     bubblesHtml += `
       <div class="chat-row ${side}" style="${colorStyle}">
         <div class="chat-meta-row">
           <span class="chat-speaker">${esc(m.from)}</span>
           <span class="chat-ts">${fmtTime(m.ts)}</span>
         </div>
-        <div class="chat-bubble${(m.text || '').length > CB_LIMIT ? ' has-more' : ''}">${chatBubbleHtml(m.text)}</div>
+        <div class="chat-bubble${bLong2 ? ' has-more' : ''}${bExp2 ? ' cb-expanded' : ''}" data-bubble-id="${esc(bId2)}">${chatBubbleHtml(m.text)}</div>
         ${noRespHtml}
       </div>`;
   }
@@ -2738,11 +2764,17 @@ function chatBubbleHtml(text) {
          `<span class="cb-full">${esc(t)}</span>`;
 }
 
-// Click-to-expand handler for chat bubbles
+// Click-to-expand handler for chat bubbles.
+// Syncs with expandedBubbles Set so expansion survives thread re-renders.
 document.addEventListener('click', function(e) {
   const bubble = e.target.closest('.chat-bubble.has-more, .fdlg-bubble.has-more');
   if (!bubble) return;
   bubble.classList.toggle('cb-expanded');
+  const id = bubble.dataset.bubbleId;
+  if (id) {
+    if (bubble.classList.contains('cb-expanded')) expandedBubbles.add(id);
+    else expandedBubbles.delete(id);
+  }
   e.stopPropagation();
 }, true);
 
