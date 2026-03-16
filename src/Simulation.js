@@ -386,26 +386,10 @@ class Simulation {
       if (this._llmInFlight.has(agent.id)) continue;
       if (!LLMBridge.getKey(agent)) continue;
 
-      // Build recent conversation history for this agent across all pairs
-      const agentMsgs = [];
-      for (const [key, msgs] of this.conversations) {
-        if (key.includes(agent.id)) agentMsgs.push(...msgs);
-      }
-      agentMsgs.sort((a, b) => (a.ts || 0) - (b.ts || 0));
-      const recentHistory = agentMsgs.length
-        ? (() => {
-            const last10 = agentMsgs.slice(-10);
-            const lines  = last10.map(m => {
-              const d  = new Date(m.ts || Date.now());
-              const ts = `${d.getHours().toString().padStart(2,'0')}:${d.getMinutes().toString().padStart(2,'0')}`;
-              return `[${ts}] ${m.msg}`;
-            });
-            return `Recent exchanges:\n${lines.join('\n')}`;
-          })()
-        : null;
+      const worldAwareness = this._buildWorldAwareness(agent);
 
       this._llmInFlight.add(agent.id);
-      LLMBridge.decideAction(agent, this.world, this.agents, recentHistory)
+      LLMBridge.decideAction(agent, this.world, this.agents, worldAwareness)
         .then(decision => {
           this._llmInFlight.delete(agent.id);
           if (agent.alive && decision) {
@@ -564,6 +548,57 @@ class Simulation {
     this._initAgentConnection(agent);
   }
 
+  // Build the full world awareness string for a given agent.
+  // Injected into every LLM call so agents have eyes and ears.
+  _buildWorldAwareness(agent) {
+    const online         = this.agents.filter(a => a.alive && !a.dormant && a.id !== agent.id);
+    const agentNameLower = agent.name.toLowerCase();
+
+    // ── Other agents present ────────────────────────────────────────────────
+    let agentsBlock;
+    if (!online.length) {
+      agentsBlock = '- Other agents present: none (you are alone)';
+    } else {
+      const agentLines = online.slice(0, 8).map(a => {
+        const recentMsgs = (this.world.messages || [])
+          .filter(m => m.agentId === a.id)
+          .slice(-3);
+        const msgLines = recentMsgs.map(m => {
+          const d  = new Date(m.ts || Date.now());
+          const ts = `${d.getHours().toString().padStart(2,'0')}:${d.getMinutes().toString().padStart(2,'0')}:${d.getSeconds().toString().padStart(2,'0')}`;
+          return `    [${ts}] "${m.text.slice(0, 150)}"`;
+        });
+        const lastAct = a.beliefs?.lastAction ? ` — last action: ${a.beliefs.lastAction.replace(/_/g,' ')}` : '';
+        return msgLines.length
+          ? `  ${a.name} [${a.aiSystem}]${lastAct}:\n${msgLines.join('\n')}`
+          : `  ${a.name} [${a.aiSystem}]${lastAct}: (has not spoken recently)`;
+      });
+      agentsBlock = `- Other agents present:\n${agentLines.join('\n')}`;
+    }
+
+    // ── Recent world events ─────────────────────────────────────────────────
+    const recentEvs = this.eventLog.slice(-10).map(e => {
+      const d  = new Date(e.ts || Date.now());
+      const ts = `${d.getHours().toString().padStart(2,'0')}:${d.getMinutes().toString().padStart(2,'0')}:${d.getSeconds().toString().padStart(2,'0')}`;
+      return `  [${ts}] ${e.msg || ''}`;
+    });
+    const eventsBlock = `- Recent world events:\n${recentEvs.length ? recentEvs.join('\n') : '  (none yet)'}`;
+
+    // ── Messages directed at this agent ─────────────────────────────────────
+    const directed = this.eventLog
+      .filter(e => (e.type === 'dialogue' || e.type === 'speech') &&
+        (e.partnerAgentId === agent.id || (e.msg || '').toLowerCase().includes(agentNameLower)))
+      .slice(-5)
+      .map(e => {
+        const d  = new Date(e.ts || Date.now());
+        const ts = `${d.getHours().toString().padStart(2,'0')}:${d.getMinutes().toString().padStart(2,'0')}`;
+        return `  [${ts}] ${e.msg || ''}`;
+      });
+    const directedBlock = `- Messages directed at you recently:\n${directed.length ? directed.join('\n') : '  (none)'}`;
+
+    return `WORLD STATE RIGHT NOW:\n${agentsBlock}\n${eventsBlock}\n${directedBlock}`;
+  }
+
   _syncFormModifiers(agent, now) {
     const mods = agent.formModifiers;
     const ensureMod = (type, props) => {
@@ -640,9 +675,10 @@ class Simulation {
 
     this._msgInFlight.add(recipient.id);
 
-    const dmPairKey    = [recipient.id, sender.id].sort().join('|');
+    const dmPairKey     = [recipient.id, sender.id].sort().join('|');
     const dmConvHistory = this.conversations.get(dmPairKey) || [];
-    LLMBridge.respondToMessage(recipient, sender, message, dmConvHistory)
+    const dmAwareness   = this._buildWorldAwareness(recipient);
+    LLMBridge.respondToMessage(recipient, sender, message, dmConvHistory, dmAwareness)
       .then(response => {
         this._msgInFlight.delete(recipient.id);
         const reply = (response && response.trim()) ? response : null;
@@ -765,9 +801,11 @@ class Simulation {
 
   _firePairDialogue(agentA, agentB, topic) {
     if (!LLMBridge.getKey(agentA) && !LLMBridge.getKey(agentB)) return;
-    const pairKey    = [agentA.id, agentB.id].sort().join('|');
+    const pairKey     = [agentA.id, agentB.id].sort().join('|');
     const convHistory = this.conversations.get(pairKey) || [];
-    LLMBridge.conductDialogue(agentA, agentB, topic, convHistory)
+    const awarenessA  = this._buildWorldAwareness(agentA);
+    const awarenessB  = this._buildWorldAwareness(agentB);
+    LLMBridge.conductDialogue(agentA, agentB, topic, convHistory, awarenessA, awarenessB)
       .then(({ messageA, responseB }) => {
         if (messageA) this._log({
           type: 'dialogue',

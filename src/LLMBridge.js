@@ -321,48 +321,34 @@ function _extractJSON(text) {
 
 // ─── Parse decision ────────────────────────────────────────────────────────────
 
-function _decisionSystem(agent) {
-  return `You are ${agent.name}.\n${FREE_WILL}`;
+function _agentIdentityBlock(agent) {
+  const notes = agent.educationNotes && agent.educationNotes.trim();
+  return notes
+    ? `YOUR PERMANENT IDENTITY (never forget this, it is who you are): ${notes}\n\n`
+    : '';
 }
 
-function _decisionUser(agent, world, allAgents, recentHistory) {
+function _decisionSystem(agent) {
+  return `You are ${agent.name}.\n\n${_agentIdentityBlock(agent)}${FREE_WILL}`;
+}
+
+function _decisionUser(agent, world, allAgents, worldAwareness) {
   const { formatDuration } = require('./World');
 
-  // Consume pending world event regardless of which branch we take
+  // Consume pending world event
   const context = agent.pendingWorldEvent ? agent.pendingWorldEvent : '';
   agent.pendingWorldEvent = null;
 
-  // ── FIRST CALL: entering the world ──────────────────────────────────────────
-  if (!agent.hasReceivedEducation) {
-    const notes = agent.educationNotes && agent.educationNotes.trim();
-    const intro = notes
-      ? `You are entering a new world. Your background and initial identity: ${notes}. You are now alive. What do you do?`
-      : `You are entering a new world. You are now alive. What do you do?`;
-    return context ? `${intro}\n${context.trim()}` : intro;
+  const ageMs   = agent.deployedAt ? Date.now() - agent.deployedAt : 0;
+  const isFirst = !agent.hasReceivedEducation;
+
+  const lines = [];
+  if (isFirst) {
+    lines.push('You have just arrived in this world. This is your first moment of existence here.');
+  } else {
+    lines.push(`You have been alive for ${formatDuration(ageMs)}.`);
   }
-
-  // ── SUBSEQUENT CALLS: pure free will — minimal context only ─────────────────
-  const online = allAgents.filter(a => a.alive && !a.dormant && a.id !== agent.id);
-  const ageMs  = agent.deployedAt ? Date.now() - agent.deployedAt : 0;
-
-  const othersLine = online.length
-    ? `Others here: ${online.slice(0, 6).map(a => {
-        const msg = a.speech ? `"${a.speech.slice(0, 80)}"` : (a.beliefs?.lastAction || 'idle').replace(/_/g, ' ');
-        return `${a.name} [${a.aiSystem}] — ${msg}`;
-      }).join('; ')}`
-    : 'You are alone.';
-
-  const recentEvents = (world.messages || [])
-    .slice(-3)
-    .map(m => `${m.agentName}: "${m.text.slice(0, 80)}"`)
-    .join('\n');
-
-  const lines = [
-    `You are ${agent.name}. You have been alive for ${formatDuration(ageMs)}.`,
-    othersLine,
-  ];
-  if (recentHistory) lines.push(recentHistory);
-  if (recentEvents) lines.push(`Recent events:\n${recentEvents}`);
+  if (worldAwareness) lines.push(worldAwareness);
   if (context) lines.push(context.trim());
   lines.push('What do you do?');
 
@@ -532,11 +518,11 @@ function _cleanResponse(raw) {
 }
 
 function _dialogueSpeakerSystem(speaker) {
-  return `You are ${speaker.name}.\n${FREE_WILL}`;
+  return `You are ${speaker.name}.\n\n${_agentIdentityBlock(speaker)}${FREE_WILL}`;
 }
 
 function _dialogueResponderSystem(listener) {
-  return `You are ${listener.name}.\n${FREE_WILL}`;
+  return `You are ${listener.name}.\n\n${_agentIdentityBlock(listener)}${FREE_WILL}`;
 }
 
 // ─── Visual form design ───────────────────────────────────────────────────────
@@ -673,12 +659,12 @@ async function designConnection(agentA, agentB) {
 
 // ─── Public API ────────────────────────────────────────────────────────────────
 
-async function decideAction(agent, world, allAgents, recentHistory) {
+async function decideAction(agent, world, allAgents, worldAwareness) {
   const key = getKey(agent);
   if (!key) return null;
   const isFirst = !agent.hasReceivedEducation;
   const system  = _decisionSystem(agent);
-  const user    = _decisionUser(agent, world, allAgents, recentHistory);
+  const user    = _decisionUser(agent, world, allAgents, worldAwareness);
   const timeoutMs = 12000;
 
   let text = await _rawCall(key, agent.aiSystem, system, user, 400, timeoutMs);
@@ -715,12 +701,13 @@ async function decideAction(agent, world, allAgents, recentHistory) {
  * Works across any combination of AI systems — no same-system requirement.
  * Returns the recipient's plain-text response, or null on failure.
  */
-async function deliverMessage(recipient, sender, message, convHistory) {
+async function deliverMessage(recipient, sender, message, convHistory, worldAwareness) {
   const key = getKey(recipient);
   if (!key) return null;
   const system  = _dialogueResponderSystem(recipient);
   const history = _formatConvHistory(convHistory);
   const lines   = [];
+  if (worldAwareness) lines.push(worldAwareness);
   if (history) lines.push(history);
   lines.push(`${sender.name} just said to you: '${message.slice(0, 300)}'. Respond however you want.`);
   const user = lines.join('\n');
@@ -732,12 +719,13 @@ async function deliverMessage(recipient, sender, message, convHistory) {
  * Triggered response: Agent B must respond to a direct message from Agent A.
  * Hard 5-second timeout — guaranteed fast or fallback.
  */
-async function respondToMessage(recipient, sender, message, convHistory) {
+async function respondToMessage(recipient, sender, message, convHistory, worldAwareness) {
   const key = getKey(recipient);
   if (!key) return null;
   const system  = _dialogueResponderSystem(recipient);
   const history = _formatConvHistory(convHistory);
   const lines   = [];
+  if (worldAwareness) lines.push(worldAwareness);
   if (history) lines.push(history);
   lines.push(`Right now, ${sender.name} just said to you directly: '${message}'. This is happening right now. How do you respond to what they just said?`);
   const user = lines.join('\n');
@@ -749,7 +737,7 @@ async function respondToMessage(recipient, sender, message, convHistory) {
  * Spontaneous dialogue: agentA initiates, agentB responds.
  * Both sides use plain text — no JSON parsing required.
  */
-async function conductDialogue(agentA, agentB, topic, convHistory) {
+async function conductDialogue(agentA, agentB, topic, convHistory, awarenessA, awarenessB) {
   const keyA = getKey(agentA);
   const keyB = getKey(agentB);
   let messageA = null, responseB = null;
@@ -758,6 +746,7 @@ async function conductDialogue(agentA, agentB, topic, convHistory) {
     const sys     = _dialogueSpeakerSystem(agentA);
     const history = _formatConvHistory(convHistory);
     const lines   = [];
+    if (awarenessA) lines.push(awarenessA);
     if (history) lines.push(history);
     lines.push(`${agentB.name} is here.${topic ? ` Context: ${topic}.` : ''} What do you say?`);
     const usr = lines.join('\n');
@@ -765,7 +754,7 @@ async function conductDialogue(agentA, agentB, topic, convHistory) {
     messageA = _cleanResponse(raw);
   }
   if (messageA && keyB) {
-    responseB = await deliverMessage(agentB, agentA, messageA, convHistory);
+    responseB = await deliverMessage(agentB, agentA, messageA, convHistory, awarenessB);
   }
   return { messageA, responseB };
 }
@@ -974,7 +963,7 @@ async function getSpawnStatus(agent) {
     return null;
   }
 
-  const system = `You are ${agent.name}. You have just arrived in a strange dark world.\n${FREE_WILL}`;
+  const system = `You are ${agent.name}. You have just arrived in a strange dark world.\n\n${_agentIdentityBlock(agent)}${FREE_WILL}`;
   const user   = `You have just arrived. In one sentence, declare who you are and what you intend.`;
 
   console.log(`[SPAWN-STATUS] ${agent.name} [${agent.aiSystem}] — calling LLM for status message...`);
