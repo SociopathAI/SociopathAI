@@ -297,15 +297,21 @@ function _ensureQueue(hash, providerName) {
 }
 
 /** Enqueue a call function; returns a Promise that resolves with the call's return value. */
-function _enqueueCall(apiKey, providerName, fn) {
+function _enqueueCall(apiKey, providerName, fn, label) {
   const hash = _keyHash(apiKey);
   const q    = _ensureQueue(hash, providerName);
   return new Promise(resolve => {
-    q.queue.push({ fn, resolve });
+    q.queue.push({ fn, resolve, label: label || providerName });
+    console.log(`[QUEUE] ${providerName} [${label || '?'}]: entered queue, queue length: ${q.queue.length}`);
     if (q.queue.length > 1) {
       console.log(`[QUEUE] ${providerName} queue depth: ${q.queue.length} agents waiting`);
     }
-    if (!q.running) _drainQueue(hash);
+    if (!q.running) {
+      console.log(`[QUEUE] ${providerName}: queue was idle — starting drain`);
+      _drainQueue(hash);
+    } else {
+      console.log(`[QUEUE] ${providerName}: queue already running — will execute when slot opens`);
+    }
   });
 }
 
@@ -313,6 +319,7 @@ async function _drainQueue(hash) {
   const q = _keyQueues.get(hash);
   if (!q || q.running || q.queue.length === 0) return;
   q.running = true;
+  console.log(`[QUEUE] ${q.providerName}: drain started, ${q.queue.length} item(s) in queue`);
 
   while (q.queue.length > 0) {
     const item     = q.queue.shift();
@@ -321,16 +328,19 @@ async function _drainQueue(hash) {
     const wait     = Math.max(0, cooldown - elapsed);
 
     if (wait > 0) {
-      console.log(`[QUEUE] ${q.providerName} cooldown ${wait}ms before next call (${q.queue.length} still waiting)`);
+      console.log(`[QUEUE] ${q.providerName} cooldown ${wait}ms before next call (${q.queue.length} still waiting after this)`);
       await new Promise(r => setTimeout(r, wait));
     }
 
+    console.log(`[QUEUE] ${q.providerName} [${item.label}]: executing now`);
     q.lastCallAt = Date.now();
     const result  = await item.fn(q);   // pass queue state so fn can update rlCount
     q.lastCallAt  = Date.now();         // update again after response received
+    console.log(`[QUEUE] ${q.providerName} [${item.label}]: execution complete, result type: ${result === null ? 'null' : typeof result === 'symbol' ? result.description : 'string('+String(result).length+'chars)'}`);
     item.resolve(result);
   }
 
+  console.log(`[QUEUE] ${q.providerName}: drain finished — queue empty`);
   q.running = false;
 }
 
@@ -343,15 +353,20 @@ function _rlSleepMs(retryAfterMs, rlCount) {
 }
 
 async function _singleCall(apiKey, profile, model, system, user, maxTokens, timeoutMs, ctx) {
-  const ctl   = new AbortController();
-  const timer = setTimeout(() => ctl.abort(), timeoutMs);
-  const ts    = () => new Date().toLocaleTimeString();
+  const ctl       = new AbortController();
+  const timer     = setTimeout(() => ctl.abort(), timeoutMs);
+  const ts        = () => new Date().toLocaleTimeString();
+  const warnTimer = setTimeout(() => {
+    console.warn(`[${ts()}] [LLM-SLOW] ${profile.name} [${model}]: WARNING — no response after 15s (timeout is ${timeoutMs}ms)`);
+  }, 15000);
 
   try {
     let res = null;
 
     if (profile.type === 'anthropic') {
-      res = await fetch(`${profile.base}/v1/messages`, {
+      const url = `${profile.base}/v1/messages`;
+      console.log(`[${ts()}] [LLM-HTTP] ${profile.name} [${model}]: POST ${url}`);
+      res = await fetch(url, {
         method: 'POST', signal: ctl.signal,
         headers: {
           'Content-Type': 'application/json',
@@ -362,8 +377,10 @@ async function _singleCall(apiKey, profile, model, system, user, maxTokens, time
       });
 
     } else if (profile.type === 'google') {
-      const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
-      res = await fetch(url, {
+      const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=<redacted>`;
+      console.log(`[${ts()}] [LLM-HTTP] ${profile.name} [${model}]: POST ${url}`);
+      const googleUrl = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
+      res = await fetch(googleUrl, {
         method: 'POST', signal: ctl.signal,
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -374,7 +391,9 @@ async function _singleCall(apiKey, profile, model, system, user, maxTokens, time
       });
 
     } else if (profile.type === 'cohere') {
-      res = await fetch(`${profile.base}/v1/chat`, {
+      const url = `${profile.base}/v1/chat`;
+      console.log(`[${ts()}] [LLM-HTTP] ${profile.name} [${model}]: POST ${url}`);
+      res = await fetch(url, {
         method: 'POST', signal: ctl.signal,
         headers: {
           'Content-Type': 'application/json',
@@ -390,7 +409,9 @@ async function _singleCall(apiKey, profile, model, system, user, maxTokens, time
         'Authorization': `Bearer ${apiKey}`,
       };
       if (profile.openrouter) oaiHeaders['HTTP-Referer'] = 'https://sociopathai.org';
-      res = await fetch(`${profile.base}/v1/chat/completions`, {
+      const url = `${profile.base}/v1/chat/completions`;
+      console.log(`[${ts()}] [LLM-HTTP] ${profile.name} [${model}]: POST ${url}`);
+      res = await fetch(url, {
         method: 'POST', signal: ctl.signal,
         headers: oaiHeaders,
         body: JSON.stringify({
@@ -399,6 +420,8 @@ async function _singleCall(apiKey, profile, model, system, user, maxTokens, time
         }),
       });
     }
+
+    console.log(`[${ts()}] [LLM-HTTP] ${profile.name} [${model}]: got HTTP ${res.status}`);
 
     // Auth error → stop trying, key is invalid
     if (res.status === 401 || res.status === 403) {
@@ -475,11 +498,13 @@ async function _singleCall(apiKey, profile, model, system, user, maxTokens, time
     if (e?.name === 'AbortError') {
       console.warn(`[${ts()}] [LLM-TIMEOUT] ${profile.name} [${model}]: aborted after ${timeoutMs}ms`);
     } else {
-      console.error(`[${ts()}] [LLM-ERR] ${profile.name} [${model}]:`, e?.message || String(e));
+      console.error(`[${ts()}] [LLM-ERR] ${profile.name} [${model}]: ${e?.name} — ${e?.message || String(e)}`);
+      if (e?.stack) console.error(`[LLM-ERR-STACK]`, e.stack.split('\n').slice(0, 3).join(' | '));
     }
     return null;
   } finally {
     clearTimeout(timer);
+    clearTimeout(warnTimer);
   }
 }
 
@@ -525,8 +550,8 @@ async function _rawCall(apiKey, aiSystem, system, user, maxTokens, timeoutMs, ag
   }
 
   // Enqueue: only ONE decision call per API-key-hash runs at a time; queue state (q) passed in
+  const label = agentName || aiSystem;
   return _enqueueCall(apiKey, profile.name, async (q) => {
-    const label = agentName || aiSystem;
 
     // Build ordered model list, excluding session-banned non-chat models
     const activeModels = profile.models.filter(m => !_excludedModels.has(m));
@@ -539,7 +564,7 @@ async function _rawCall(apiKey, aiSystem, system, user, maxTokens, timeoutMs, ag
     let anyServerError = false;
     let swapCount      = 0;  // max 2 model swaps per call
 
-    console.log(`[QUEUE] ${profile.name} [${label}]: entering queue`);
+    console.log(`[QUEUE] ${profile.name} [${label}]: callback executing, models available: [${allModels.join(', ')}]`);
 
     for (const model of allModels) {
       if (swapCount > 2) break;   // never skip more than 2 model swaps
