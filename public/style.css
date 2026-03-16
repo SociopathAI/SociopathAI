@@ -1322,8 +1322,7 @@ body {
   -webkit-mask-image: none;
   mask-image: none;
 }
-.chat-bubble .trunc-text,
-.fdlg-bubble .trunc-text { max-height: 5em; }
+
 
 .ev-chevron {
   font-size: 8px; color: var(--text3);

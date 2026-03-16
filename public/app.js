@@ -1743,7 +1743,7 @@ function _renderEvLogDlgThread(thread, myNames, agentSystems, agentColorMap) {
           <span class="chat-speaker">${esc(m.from)}</span>
           <span class="chat-ts">${fmtTime(m.ts)}</span>
         </div>
-        <div class="chat-bubble">${truncHtml(m.text, 200)}</div>
+        <div class="chat-bubble">${esc(m.text)}</div>
         ${noResp}
       </div>`;
   }
@@ -1929,7 +1929,7 @@ function _renderFocusDlgThread(thread, agentId, agentMap) {
           <span class="fdlg-speaker" style="color:${isMine ? focusColor : partnerColor}">${esc(m.from)}</span>
           <span class="fdlg-ts">${fmtTime(m.ts)}</span>
         </div>
-        <div class="fdlg-bubble" ${colorAttr}>${truncHtml(m.text, 200)}</div>
+        <div class="fdlg-bubble" ${colorAttr}>${esc(m.text)}</div>
       </div>`;
   }
 
@@ -2296,7 +2296,7 @@ function _renderConvoThread(thread, myNames, agentSystems, agentColorMap, focusN
           <span class="chat-speaker">${esc(m.from)}</span>
           <span class="chat-ts">${fmtTime(m.ts)}</span>
         </div>
-        <div class="chat-bubble">${truncHtml(m.text, 200)}</div>
+        <div class="chat-bubble">${esc(m.text)}</div>
         ${noRespHtml}
       </div>`;
   }
