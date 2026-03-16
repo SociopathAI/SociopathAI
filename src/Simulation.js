@@ -69,8 +69,9 @@ class Simulation {
     this._lastBadgeCheck  = 0;
     this._lastStatsSnap   = 0;
     this._lastDebugLog    = 0;
-    this._lastAmbition    = 0;
-    this._ambitionIndex   = 0;  // rotates through agents
+    this._lastAmbition      = 0;
+    this._ambitionIndex     = 0;  // rotates through agents
+    this._lastAwarenessPing = 0;  // spontaneous neighbour awareness, no LLM call
 
     // LLM pipeline
     this._llmInFlight  = new Set();
@@ -170,7 +171,24 @@ class Simulation {
       }
     }
 
-    // ── 4. Law voting ──
+    // ── 4. Spontaneous awareness ping — no LLM call, just queue a nudge ──
+    if (now - this._lastAwarenessPing >= 60000) {
+      this._lastAwarenessPing = now;
+      const active = this.agents.filter(a => a.alive && !a.dormant);
+      if (active.length >= 2) {
+        const a = active[Math.floor(Math.random() * active.length)];
+        const b = active.filter(x => x.id !== a.id)[Math.floor(Math.random() * (active.length - 1))];
+        if (a && b) {
+          if (!a.incomingMessages) a.incomingMessages = [];
+          if (!b.incomingMessages) b.incomingMessages = [];
+          a.incomingMessages.push({ from: b.name, text: `${b.name} is nearby and aware of you.`, ts: now });
+          b.incomingMessages.push({ from: a.name, text: `${a.name} is nearby and aware of you.`, ts: now });
+          console.log(`[AWARENESS] ${a.name} ↔ ${b.name} pinged`);
+        }
+      }
+    }
+
+    // ── 5. Law voting ──
     if (now - this._lastLawVote >= LAW_VOTE_INTERVAL) {
       this._lastLawVote = now;
       const lawResults = this.lawSystem.runVoting(this.agents.filter(a => a.alive && !a.dormant));
@@ -895,6 +913,7 @@ class Simulation {
     this._formInFlight.clear();
     this._lastAmbition      = 0;
     this._ambitionIndex     = 0;
+    this._lastAwarenessPing = 0;
     this.connectionDesigns.clear();
     this._connDesignInFlight.clear();
   }
