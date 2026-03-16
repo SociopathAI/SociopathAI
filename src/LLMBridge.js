@@ -264,7 +264,85 @@ const _NOT_CHAT_MODEL   = Symbol('NOT_CHAT_MODEL'); // model exists but doesn't 
 // Session-level set of models confirmed to not support chat completions — never retried
 const _excludedModels = new Set();
 
-async function _singleCall(apiKey, profile, model, system, user, maxTokens, timeoutMs) {
+// ─── Global API traffic controller (per-key-hash queue) ───────────────────────
+
+// Minimum ms between consecutive calls on the same API key
+const PROVIDER_COOLDOWNS_MS = {
+  Groq:       2000,   // 30 RPM  → 60000/30 = 2000ms
+  Llama:      2000,
+  Gemini:     4000,   // 15 RPM  → 60000/15 = 4000ms
+  ChatGPT:    1000,
+  Claude:     1000,
+  OpenRouter: 3000,
+};
+const DEFAULT_COOLDOWN_MS = 3000;
+
+/** Non-crypto hash of an API key — used only for queue grouping, key never stored. */
+function _keyHash(k) {
+  let h = 0;
+  for (let i = 0; i < k.length; i++) h = ((h << 5) - h + k.charCodeAt(i)) | 0;
+  return (h >>> 0).toString(36);
+}
+
+// Map: keyHash → { queue: [{fn, resolve}], running, lastCallAt, providerName, rlCount }
+const _keyQueues = new Map();
+
+function _ensureQueue(hash, providerName) {
+  if (!_keyQueues.has(hash)) {
+    _keyQueues.set(hash, { queue: [], running: false, lastCallAt: 0, providerName, rlCount: 0 });
+  }
+  const q = _keyQueues.get(hash);
+  q.providerName = providerName; // keep updated
+  return q;
+}
+
+/** Enqueue a call function; returns a Promise that resolves with the call's return value. */
+function _enqueueCall(apiKey, providerName, fn) {
+  const hash = _keyHash(apiKey);
+  const q    = _ensureQueue(hash, providerName);
+  return new Promise(resolve => {
+    q.queue.push({ fn, resolve });
+    if (q.queue.length > 1) {
+      console.log(`[QUEUE] ${providerName} queue depth: ${q.queue.length} agents waiting`);
+    }
+    if (!q.running) _drainQueue(hash);
+  });
+}
+
+async function _drainQueue(hash) {
+  const q = _keyQueues.get(hash);
+  if (!q || q.running || q.queue.length === 0) return;
+  q.running = true;
+
+  while (q.queue.length > 0) {
+    const item     = q.queue.shift();
+    const cooldown = PROVIDER_COOLDOWNS_MS[q.providerName] ?? DEFAULT_COOLDOWN_MS;
+    const elapsed  = Date.now() - q.lastCallAt;
+    const wait     = Math.max(0, cooldown - elapsed);
+
+    if (wait > 0) {
+      console.log(`[QUEUE] ${q.providerName} cooldown ${wait}ms before next call (${q.queue.length} still waiting)`);
+      await new Promise(r => setTimeout(r, wait));
+    }
+
+    q.lastCallAt = Date.now();
+    const result  = await item.fn(q);   // pass queue state so fn can update rlCount
+    q.lastCallAt  = Date.now();         // update again after response received
+    item.resolve(result);
+  }
+
+  q.running = false;
+}
+
+/** Compute how long to sleep on a 429 given the queue's consecutive-RL count. */
+function _rlSleepMs(retryAfterMs, rlCount) {
+  if (retryAfterMs > 0) return retryAfterMs;
+  if (rlCount <= 1)  return 60000;
+  if (rlCount === 2) return 120000;
+  return 300000;
+}
+
+async function _singleCall(apiKey, profile, model, system, user, maxTokens, timeoutMs, ctx) {
   const ctl   = new AbortController();
   const timer = setTimeout(() => ctl.abort(), timeoutMs);
   const ts    = () => new Date().toLocaleTimeString();
@@ -349,8 +427,11 @@ async function _singleCall(apiKey, profile, model, system, user, maxTokens, time
     }
 
     if (res.status === 429) {
-      const body = await res.text().catch(() => '');
-      console.warn(`[${ts()}] [LLM-429] ${profile.name}/${model}: rate limited — trying next model. ${body.slice(0, 80)}`);
+      const body          = await res.text().catch(() => '');
+      const retryHeader   = res.headers.get('retry-after') || res.headers.get('x-ratelimit-reset-requests');
+      const retryAfterMs  = retryHeader ? Math.ceil(parseFloat(retryHeader)) * 1000 : 0;
+      if (ctx) ctx.retryAfterMs = retryAfterMs;
+      console.warn(`[${ts()}] [LLM-429] ${profile.name}/${model}: rate limited${retryAfterMs ? ` (retry-after: ${retryAfterMs / 1000}s)` : ''}. ${body.slice(0, 60)}`);
       return _RATE_LIMITED;
     }
 
@@ -402,7 +483,7 @@ async function _singleCall(apiKey, profile, model, system, user, maxTokens, time
   }
 }
 
-// ─── Raw call: auto-detects provider, tries each model in order ────────────────
+// ─── Raw call: resolves provider then enqueues via per-key traffic controller ──
 
 async function _rawCall(apiKey, aiSystem, system, user, maxTokens, timeoutMs, agentName) {
   const profile = await _resolveProfileAsync(apiKey, aiSystem, agentName);
@@ -411,47 +492,56 @@ async function _rawCall(apiKey, aiSystem, system, user, maxTokens, timeoutMs, ag
     return null;
   }
 
-  // Filter out models excluded this session (confirmed non-chat) before we start
-  const activeModels = profile.models.filter(m => !_excludedModels.has(m));
-  // If all were excluded, try the hardcoded fallback list (also filtered)
-  const fallback     = (PROVIDER_FALLBACKS[profile.name] || []).filter(m => !_excludedModels.has(m));
-  const modelsToTry  = activeModels.length > 0 ? activeModels : fallback;
+  // Enqueue: only ONE call per API-key-hash runs at a time; queue state (q) passed in
+  return _enqueueCall(apiKey, profile.name, async (q) => {
+    const label = agentName || aiSystem;
 
-  let anyRateLimited = false;
-  let anyServerError = false;
+    // Build ordered model list, excluding session-banned non-chat models
+    const activeModels = profile.models.filter(m => !_excludedModels.has(m));
+    const fallback     = (PROVIDER_FALLBACKS[profile.name] || []).filter(m => !_excludedModels.has(m));
+    const allModels    = activeModels.length > 0
+      ? [...new Set([...activeModels, ...fallback])]   // primary first, fallback appended
+      : fallback;
 
-  for (const model of modelsToTry) {
-    const result = await _singleCall(apiKey, profile, model, system, user, maxTokens, timeoutMs);
-    if (result === _AUTH_ERROR)    return _AUTH_ERROR;
-    if (result === _RATE_LIMITED)  { anyRateLimited = true; continue; }
-    if (result === _SERVER_ERROR)  { anyServerError  = true; continue; }
-    if (result === _NOT_CHAT_MODEL) continue; // already added to _excludedModels in _singleCall
-    if (result !== _MODEL_NOT_FOUND) return result;
-  }
+    let anyRateLimited = false;
+    let anyServerError = false;
+    let swapCount      = 0;  // max 2 model swaps per call
 
-  // If primary list was exhausted and we haven't tried the fallback yet, retry with it
-  if (activeModels.length > 0 && fallback.length > 0) {
-    const fallbackFiltered = fallback.filter(m => !_excludedModels.has(m));
-    for (const model of fallbackFiltered) {
-      const result = await _singleCall(apiKey, profile, model, system, user, maxTokens, timeoutMs);
-      if (result === _AUTH_ERROR)     return _AUTH_ERROR;
-      if (result === _RATE_LIMITED)   { anyRateLimited = true; continue; }
-      if (result === _SERVER_ERROR)   { anyServerError  = true; continue; }
-      if (result === _NOT_CHAT_MODEL) continue;
-      if (result !== _MODEL_NOT_FOUND) return result;
+    console.log(`[QUEUE] ${profile.name} [${label}]: entering queue`);
+
+    for (const model of allModels) {
+      if (swapCount > 2) break;   // never skip more than 2 model swaps
+
+      const ctx    = {};
+      const result = await _singleCall(apiKey, profile, model, system, user, maxTokens, timeoutMs, ctx);
+
+      if (result === _AUTH_ERROR)    return _AUTH_ERROR;
+
+      if (result === _RATE_LIMITED) {
+        anyRateLimited = true;
+        swapCount++;
+        q.rlCount++;
+        const sleepMs = _rlSleepMs(ctx.retryAfterMs, q.rlCount);
+        console.log(`[QUEUE] ${profile.name} [${label}]: 429 — sleeping ${sleepMs / 1000}s (rl#${q.rlCount})`);
+        await new Promise(r => setTimeout(r, sleepMs));
+        continue;
+      }
+
+      if (result === _SERVER_ERROR)  { anyServerError = true; swapCount++; continue; }
+      if (result === _NOT_CHAT_MODEL){ swapCount++; continue; }
+      if (result === _MODEL_NOT_FOUND){ swapCount++; continue; }
+
+      // Success
+      q.rlCount = 0;  // reset consecutive-RL counter on successful call
+      console.log(`[QUEUE] ${profile.name} [${label}]: exiting queue (${q.queue.length} still waiting)`);
+      return result;
     }
-  }
 
-  if (anyRateLimited) {
-    console.warn(`[LLM-429] ${profile.name}: all models rate-limited`);
-    return _RATE_LIMITED;
-  }
-  if (anyServerError) {
-    console.warn(`[LLM-500] ${profile.name}: all models returned server error — will retry once in 30s`);
-    return _SERVER_ERROR;
-  }
-  console.error(`[LLM-FAIL] ${profile.name}: all models exhausted (${modelsToTry.join(', ')})`);
-  return null;
+    console.log(`[QUEUE] ${profile.name} [${label}]: exiting queue — all models exhausted`);
+    if (anyRateLimited) return _RATE_LIMITED;
+    if (anyServerError) return _SERVER_ERROR;
+    return null;
+  });
 }
 
 // ─── JSON extraction ───────────────────────────────────────────────────────────
@@ -847,14 +937,13 @@ async function decideAction(agent, world, allAgents, worldAwareness, incomingMsg
     }
   }
 
-  // Handle rate limit — exponential backoff: 60s → 120s → 300s
+  // Handle rate limit — queue already slept for retry-after; skip at most 2 cycles here
   if (text === _RATE_LIMITED) {
-    const count   = (agent.rateLimitBackoffCount || 0) + 1;
+    const count = Math.min((agent.rateLimitBackoffCount || 0) + 1, 2); // cap at 2
     agent.rateLimitBackoffCount = count;
-    const delays  = [60000, 120000, 300000];
-    const delay   = delays[Math.min(count - 1, delays.length - 1)];
+    const delay = count === 1 ? 30000 : 60000;  // 1 or 2 cycles at 30s each
     agent.rateLimitedUntil = Date.now() + delay;
-    console.warn(`[LLM-429] ${agent.name}: rate-limited (backoff #${count}) — pausing ${delay / 1000}s`);
+    console.warn(`[LLM-429] ${agent.name}: rate-limited (skip #${count}/2) — pausing ${delay / 1000}s`);
     return null;
   }
 
