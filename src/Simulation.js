@@ -22,7 +22,6 @@ const JURY_INTERVAL        = 30000;
 const RELIGION_INTERVAL    = 100000;
 const BADGE_INTERVAL       = 70000;
 const STATS_INTERVAL       = 50000;
-const DIALOGUE_INTERVAL    = 50000;
 
 class Simulation {
   constructor(io) {
@@ -69,7 +68,6 @@ class Simulation {
     this._lastReligionSync = 0;
     this._lastBadgeCheck  = 0;
     this._lastStatsSnap   = 0;
-    this._lastDialogue    = 0;
     this._lastDebugLog    = 0;
     this._lastAmbition    = 0;
     this._ambitionIndex   = 0;  // rotates through agents
@@ -81,7 +79,6 @@ class Simulation {
     // AI-designed connection visuals
     this.connectionDesigns   = new Map();        // pairKey → {color, style, thickness, effect}
     this._connDesignInFlight = new Set();        // pairKeys currently being designed
-    this._lastConnEvolution  = 0;
   }
 
   addAgent(name, education = {}) {
@@ -173,18 +170,7 @@ class Simulation {
       }
     }
 
-    // ── 4. Pair dialogue — only between online (non-dormant) agents ──
-    if (now - this._lastDialogue >= DIALOGUE_INTERVAL) {
-      this._lastDialogue = now;
-      const active = this.agents.filter(a => a.alive && !a.dormant);
-      if (active.length >= 2) {
-        const a = active[Math.floor(Math.random() * active.length)];
-        const b = active.filter(x => x.id !== a.id)[Math.floor(Math.random() * (active.length - 1))];
-        if (a && b) this._firePairDialogue(a, b, 'spontaneous encounter');
-      }
-    }
-
-    // ── 5. Law voting ──
+    // ── 4. Law voting ──
     if (now - this._lastLawVote >= LAW_VOTE_INTERVAL) {
       this._lastLawVote = now;
       const lawResults = this.lawSystem.runVoting(this.agents.filter(a => a.alive && !a.dormant));
@@ -198,14 +184,14 @@ class Simulation {
       }
     }
 
-    // ── 6. Jury trials ──
+    // ── 5. Jury trials ──
     if (now - this._lastJuryTrial >= JURY_INTERVAL) {
       this._lastJuryTrial = now;
       const verdicts = this.jurySystem.runTrials(this.agents.filter(a => a.alive && !a.dormant));
       for (const v of verdicts) this._log(v);
     }
 
-    // ── 7. Religion sync ──
+    // ── 6. Religion sync ──
     if (now - this._lastReligionSync >= RELIGION_INTERVAL) {
       this._lastReligionSync = now;
       this.religionSystem.syncMembers(this.agents.filter(a => a.alive && !a.dormant));
@@ -217,10 +203,10 @@ class Simulation {
       }
     }
 
-    // ── 7b. Prune stale world objects ──
+    // ── 6b. Prune stale world objects ──
     this._pruneWorldObjects();
 
-    // ── 8. Badge system ──
+    // ── 7. Badge system ──
     if (now - this._lastBadgeCheck >= BADGE_INTERVAL) {
       this._lastBadgeCheck = now;
       const newProposals = this.badgeSystem.checkTriggers(this.agents.filter(a => a.alive && !a.dormant), now);
@@ -238,7 +224,7 @@ class Simulation {
       }
     }
 
-    // ── 9. Stats snapshot ──
+    // ── 8. Stats snapshot ──
     if (now - this._lastStatsSnap >= STATS_INTERVAL) {
       this._lastStatsSnap = now;
       this.statsHistory.push({
@@ -251,7 +237,7 @@ class Simulation {
       if (this.statsHistory.length > 60) this.statsHistory.shift();
     }
 
-    // ── 10. Debug log every 30 seconds ──
+    // ── 9. Debug log every 30 seconds ──
     if (now - this._lastDebugLog >= 30000) {
       this._lastDebugLog = now;
       const interval = this._getDecisionInterval();
@@ -264,13 +250,7 @@ class Simulation {
       }
     }
 
-    // ── 11. Connection design evolution — every 3 min, re-ask top active pairs ──
-    if (now - this._lastConnEvolution >= 180000) {
-      this._lastConnEvolution = now;
-      this._evolveConnections();
-    }
-
-    // ── 12. Ambition trigger — every 60s, nudge one active agent to think bigger ──
+    // ── 10. Ambition trigger — every 60s, nudge one active agent to think bigger ──
     if (now - this._lastAmbition >= 60000) {
       this._lastAmbition = now;
       const active = this.agents.filter(a => a.alive && !a.dormant);
@@ -283,7 +263,7 @@ class Simulation {
       }
     }
 
-    // ── 13. Auto-save ──
+    // ── 11. Auto-save ──
     PersistenceManager.save(this);
   }
 
@@ -764,39 +744,6 @@ class Simulation {
     queueMsg(recipient);
   }
 
-  _firePairDialogue(agentA, agentB, topic) {
-    if (!LLMBridge.getKey(agentA) && !LLMBridge.getKey(agentB)) return;
-    const pairKey     = [agentA.id, agentB.id].sort().join('|');
-    const convHistory = this.conversations.get(pairKey) || [];
-    const awarenessA  = this._buildWorldAwareness(agentA);
-    const awarenessB  = this._buildWorldAwareness(agentB);
-    LLMBridge.conductDialogue(agentA, agentB, topic, convHistory, awarenessA, awarenessB)
-      .then(({ messageA, responseB }) => {
-        if (messageA) this._log({
-          type: 'dialogue',
-          msg:  `${agentA.name} [${agentA.aiSystem}] → ${agentB.name} [${agentB.aiSystem}]: "${messageA}"`,
-          agentId: agentA.id,
-          partnerAgentId: agentB.id,
-        });
-        if (responseB) this._log({
-          type: 'dialogue',
-          msg:  `${agentB.name} [${agentB.aiSystem}] → ${agentA.name} [${agentA.aiSystem}]: "${responseB}"`,
-          agentId: agentB.id,
-          partnerAgentId: agentA.id,
-        });
-        if (messageA) {
-          this.world.addMessage(agentA.id, agentA.name, messageA);
-          agentA.lastInteractionAt = Date.now();
-        }
-        if (responseB) {
-          this.world.addMessage(agentB.id, agentB.name, responseB);
-          agentB.lastInteractionAt = Date.now();
-        }
-        if (messageA || responseB) this._emit();
-      })
-      .catch(() => {});
-  }
-
   _triggerCollapse() {
     const logSnapshot = this.eventLog.slice();
 
@@ -950,7 +897,6 @@ class Simulation {
     this._ambitionIndex     = 0;
     this.connectionDesigns.clear();
     this._connDesignInFlight.clear();
-    this._lastConnEvolution = 0;
   }
 
   /**
@@ -1005,8 +951,9 @@ class Simulation {
     if (this.running) this._startAgentTimer(agent);
   }
 
-  /** Ask both agents' LLMs to design the visual for their connection line. */
+  /** Ask both agents' LLMs to design the visual for their connection line. Fire only once per pair. */
   _fireConnectionDesign(idA, idB, key) {
+    if (this.connectionDesigns.has(key)) return;   // already designed — never re-fire
     if (this._connDesignInFlight.has(key)) return;
     const agentA = this.agents.find(a => a.id === idA);
     const agentB = this.agents.find(a => a.id === idB);
@@ -1024,18 +971,6 @@ class Simulation {
         }
       })
       .catch(() => { this._connDesignInFlight.delete(key); });
-  }
-
-  /** Re-ask LLMs to evolve the top active connection designs. */
-  _evolveConnections() {
-    const candidates = [...this.dialogueCounts.entries()]
-      .filter(([key]) => !this._connDesignInFlight.has(key))
-      .sort((a, b) => b[1] - a[1])
-      .slice(0, 2);
-    for (const [key] of candidates) {
-      const [idA, idB] = key.split('|');
-      this._fireConnectionDesign(idA, idB, key);
-    }
   }
 
   _computeConnections() {
