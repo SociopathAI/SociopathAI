@@ -1873,6 +1873,25 @@ details[open] .ev-raw-summary::before { content: '▼ '; }
 .fdlg-bubble-theirs .fdlg-bubble { border-top-left-radius: 3px; }
 .fdlg-bubble-mine   .fdlg-bubble { border-top-right-radius: 3px; }
 
+/* ── Chat bubble click-to-expand (100-char preview) ── */
+.chat-bubble.has-more,
+.fdlg-bubble.has-more  { cursor: pointer; }
+
+.cb-full               { display: none; }
+.cb-dots               { color: var(--text3); opacity: 0.7; }
+
+/* Expanded state: hide preview, reveal full text with fade */
+.cb-expanded .cb-short { display: none; }
+.cb-expanded .cb-full  {
+  display: inline;
+  animation: cb-fadein 0.2s ease;
+}
+
+@keyframes cb-fadein {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
+
 /* ══════════════════ LEADERBOARD ROW ══════════════════ */
 .leaderboard-row {
   display: grid;

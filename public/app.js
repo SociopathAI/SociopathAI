@@ -1311,6 +1311,8 @@ function renderEventLog(events, categories, force) {
 
   // Apply filters
   let filtered = events;
+  // Dialogue events live in the Chats tab only — never shown in the Events feed
+  filtered = filtered.filter(e => e.type !== 'dialogue');
   if (focusAgentId) {
     // Focus mode: agent-specific events only
     filtered = filtered.filter(e => e.agentId === focusAgentId || e.partnerAgentId === focusAgentId);
@@ -1743,7 +1745,7 @@ function _renderEvLogDlgThread(thread, myNames, agentSystems, agentColorMap) {
           <span class="chat-speaker">${esc(m.from)}</span>
           <span class="chat-ts">${fmtTime(m.ts)}</span>
         </div>
-        <div class="chat-bubble">${esc(m.text)}</div>
+        <div class="chat-bubble${(m.text || '').length > CB_LIMIT ? ' has-more' : ''}">${chatBubbleHtml(m.text)}</div>
         ${noResp}
       </div>`;
   }
@@ -1929,7 +1931,7 @@ function _renderFocusDlgThread(thread, agentId, agentMap) {
           <span class="fdlg-speaker" style="color:${isMine ? focusColor : partnerColor}">${esc(m.from)}</span>
           <span class="fdlg-ts">${fmtTime(m.ts)}</span>
         </div>
-        <div class="fdlg-bubble" ${colorAttr}>${esc(m.text)}</div>
+        <div class="fdlg-bubble${(m.text || '').length > CB_LIMIT ? ' has-more' : ''}" ${colorAttr}>${chatBubbleHtml(m.text)}</div>
       </div>`;
   }
 
@@ -2296,7 +2298,7 @@ function _renderConvoThread(thread, myNames, agentSystems, agentColorMap, focusN
           <span class="chat-speaker">${esc(m.from)}</span>
           <span class="chat-ts">${fmtTime(m.ts)}</span>
         </div>
-        <div class="chat-bubble">${esc(m.text)}</div>
+        <div class="chat-bubble${(m.text || '').length > CB_LIMIT ? ' has-more' : ''}">${chatBubbleHtml(m.text)}</div>
         ${noRespHtml}
       </div>`;
   }
@@ -2721,6 +2723,26 @@ document.addEventListener('click', function(e) {
   const el = e.target.closest('.trunc-text');
   if (!el) return;
   el.classList.toggle('trunc-expanded');
+  e.stopPropagation();
+}, true);
+
+// ─── CHAT BUBBLE TRUNCATION (100-char preview, click to expand) ───────────────
+
+const CB_LIMIT = 100;
+
+// Returns inner HTML for a chat/fdlg bubble with click-to-expand support.
+function chatBubbleHtml(text) {
+  const t = text || '';
+  if (t.length <= CB_LIMIT) return esc(t);
+  return `<span class="cb-short">${esc(t.slice(0, CB_LIMIT))}<span class="cb-dots"> …</span></span>` +
+         `<span class="cb-full">${esc(t)}</span>`;
+}
+
+// Click-to-expand handler for chat bubbles
+document.addEventListener('click', function(e) {
+  const bubble = e.target.closest('.chat-bubble.has-more, .fdlg-bubble.has-more');
+  if (!bubble) return;
+  bubble.classList.toggle('cb-expanded');
   e.stopPropagation();
 }, true);
 
