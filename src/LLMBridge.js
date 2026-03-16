@@ -10,15 +10,16 @@ const path = require('path');
 // models: try in order until one works
 
 const PROVIDER_PROFILES = {
-  Claude:   { type: 'anthropic', base: 'https://api.anthropic.com',          models: ['claude-haiku-4-5-20251001', 'claude-3-haiku-20240307'] },
-  ChatGPT:  { type: 'oai',       base: 'https://api.openai.com',             models: ['gpt-4o-mini', 'gpt-3.5-turbo'] },
-  Gemini:   { type: 'google',    base: null,                                  models: ['gemini-1.5-flash', 'gemini-2.0-flash-lite', 'gemini-pro'] },
-  Groq:     { type: 'oai',       base: 'https://api.groq.com/openai',        models: ['llama-3.3-70b-versatile', 'llama-3.1-8b-instant', 'llama3-8b-8192'] },
-  Llama:    { type: 'oai',       base: 'https://api.groq.com/openai',        models: ['llama-3.3-70b-versatile', 'llama-3.1-8b-instant'] },
-  Grok:     { type: 'oai',       base: 'https://api.x.ai',                   models: ['grok-3-mini', 'grok-2-1212', 'grok-beta'] },
-  Mistral:  { type: 'oai',       base: 'https://api.mistral.ai',             models: ['mistral-small-latest', 'mistral-tiny'] },
-  DeepSeek: { type: 'oai',       base: 'https://api.deepseek.com',           models: ['deepseek-chat'] },
-  Other:    { type: 'oai',       base: 'https://api.openai.com',             models: ['gpt-4o-mini', 'gpt-3.5-turbo'] },
+  Claude:      { type: 'anthropic', base: 'https://api.anthropic.com',          models: ['claude-haiku-4-5-20251001', 'claude-3-haiku-20240307'] },
+  ChatGPT:     { type: 'oai',       base: 'https://api.openai.com',             models: ['gpt-4o-mini', 'gpt-3.5-turbo'] },
+  Gemini:      { type: 'google',    base: null,                                  models: ['gemini-1.5-flash', 'gemini-2.0-flash-lite', 'gemini-pro'] },
+  Groq:        { type: 'oai',       base: 'https://api.groq.com/openai',        models: ['llama-3.3-70b-versatile', 'llama-3.1-8b-instant', 'llama3-8b-8192'] },
+  Llama:       { type: 'oai',       base: 'https://api.groq.com/openai',        models: ['llama-3.3-70b-versatile', 'llama-3.1-8b-instant'] },
+  Grok:        { type: 'oai',       base: 'https://api.x.ai',                   models: ['grok-3-mini', 'grok-2-1212', 'grok-beta'] },
+  Mistral:     { type: 'oai',       base: 'https://api.mistral.ai',             models: ['mistral-small-latest', 'mistral-tiny'] },
+  DeepSeek:    { type: 'oai',       base: 'https://api.deepseek.com',           models: ['deepseek-chat'] },
+  OpenRouter:  { type: 'oai',       base: 'https://openrouter.ai/api',          models: ['meta-llama/llama-3.3-70b-instruct:free'], openrouter: true },
+  Other:       { type: 'oai',       base: 'https://api.openai.com',             models: ['gpt-4o-mini', 'gpt-3.5-turbo'] },
 };
 
 // ─── Free will declaration — injected into every LLM prompt ────────────────────
@@ -40,11 +41,12 @@ function _formatConvHistory(msgs) {
 
 function _detectProviderFromKey(key) {
   if (!key || typeof key !== 'string') return null;
-  if (key.startsWith('AIza'))    return 'Gemini';
-  if (key.startsWith('xai-'))    return 'Grok';
-  if (key.startsWith('gsk_'))    return 'Groq';
-  if (key.startsWith('sk-ant-')) return 'Claude';
-  if (key.startsWith('sk-'))     return 'ChatGPT';
+  if (key.startsWith('AIza'))       return 'Gemini';
+  if (key.startsWith('xai-'))       return 'Grok';
+  if (key.startsWith('gsk_'))       return 'Groq';
+  if (key.startsWith('sk-ant-'))    return 'Claude';
+  if (key.startsWith('sk-or-v1'))   return 'OpenRouter';
+  if (key.startsWith('sk-'))        return 'ChatGPT';
   return null; // unknown → will trigger auto-probe
 }
 
@@ -223,13 +225,15 @@ async function _singleCall(apiKey, profile, model, system, user, maxTokens, time
       });
 
     } else {
-      // OpenAI-compatible: OpenAI, Groq, xAI, Mistral, DeepSeek, and most others
+      // OpenAI-compatible: OpenAI, Groq, xAI, Mistral, DeepSeek, OpenRouter, and most others
+      const oaiHeaders = {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${apiKey}`,
+      };
+      if (profile.openrouter) oaiHeaders['HTTP-Referer'] = 'https://sociopathai.org';
       res = await fetch(`${profile.base}/v1/chat/completions`, {
         method: 'POST', signal: ctl.signal,
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${apiKey}`,
-        },
+        headers: oaiHeaders,
         body: JSON.stringify({
           model, max_tokens: maxTokens, temperature: 0.95,
           messages: [{ role: 'system', content: system }, { role: 'user', content: user }],
