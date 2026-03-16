@@ -386,8 +386,26 @@ class Simulation {
       if (this._llmInFlight.has(agent.id)) continue;
       if (!LLMBridge.getKey(agent)) continue;
 
+      // Build recent conversation history for this agent across all pairs
+      const agentMsgs = [];
+      for (const [key, msgs] of this.conversations) {
+        if (key.includes(agent.id)) agentMsgs.push(...msgs);
+      }
+      agentMsgs.sort((a, b) => (a.ts || 0) - (b.ts || 0));
+      const recentHistory = agentMsgs.length
+        ? (() => {
+            const last10 = agentMsgs.slice(-10);
+            const lines  = last10.map(m => {
+              const d  = new Date(m.ts || Date.now());
+              const ts = `${d.getHours().toString().padStart(2,'0')}:${d.getMinutes().toString().padStart(2,'0')}`;
+              return `[${ts}] ${m.msg}`;
+            });
+            return `Recent exchanges:\n${lines.join('\n')}`;
+          })()
+        : null;
+
       this._llmInFlight.add(agent.id);
-      LLMBridge.decideAction(agent, this.world, this.agents)
+      LLMBridge.decideAction(agent, this.world, this.agents, recentHistory)
         .then(decision => {
           this._llmInFlight.delete(agent.id);
           if (agent.alive && decision) {
@@ -622,7 +640,9 @@ class Simulation {
 
     this._msgInFlight.add(recipient.id);
 
-    LLMBridge.respondToMessage(recipient, sender, message)
+    const dmPairKey    = [recipient.id, sender.id].sort().join('|');
+    const dmConvHistory = this.conversations.get(dmPairKey) || [];
+    LLMBridge.respondToMessage(recipient, sender, message, dmConvHistory)
       .then(response => {
         this._msgInFlight.delete(recipient.id);
         const reply = (response && response.trim()) ? response : null;
@@ -741,8 +761,9 @@ class Simulation {
 
   _firePairDialogue(agentA, agentB, topic) {
     if (!LLMBridge.getKey(agentA) && !LLMBridge.getKey(agentB)) return;
-    // Select partner purely by relationship + randomness — no AI system bias
-    LLMBridge.conductDialogue(agentA, agentB, topic)
+    const pairKey    = [agentA.id, agentB.id].sort().join('|');
+    const convHistory = this.conversations.get(pairKey) || [];
+    LLMBridge.conductDialogue(agentA, agentB, topic, convHistory)
       .then(({ messageA, responseB }) => {
         if (messageA) this._log({
           type: 'dialogue',
