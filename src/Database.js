@@ -85,6 +85,17 @@ async function initDb() {
     );
   `);
 
+  // Schema migrations — IF NOT EXISTS guards ensure existing data is never lost
+  await _pool.query(`
+    ALTER TABLE agents ADD COLUMN IF NOT EXISTS education_notes TEXT;
+    ALTER TABLE agents ADD COLUMN IF NOT EXISTS memory_summary   TEXT;
+    ALTER TABLE agents ADD COLUMN IF NOT EXISTS message_queue    JSONB   DEFAULT '[]';
+    ALTER TABLE agents ADD COLUMN IF NOT EXISTS jitter_ms        INTEGER DEFAULT 0;
+    ALTER TABLE agents ADD COLUMN IF NOT EXISTS api_status       VARCHAR(20) DEFAULT 'ok';
+    ALTER TABLE agents ADD COLUMN IF NOT EXISTS backoff_until    BIGINT  DEFAULT 0;
+    ALTER TABLE agents ADD COLUMN IF NOT EXISTS model_name       VARCHAR(100);
+  `);
+
   // Indexes (safe to run repeatedly)
   await _pool.query(`
     CREATE INDEX IF NOT EXISTS events_ts_idx       ON events (ts);
