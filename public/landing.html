@@ -695,15 +695,11 @@ function _addFeedItem(entry, agentsById) {
   const d  = new Date(entry.ts || Date.now());
   const ts = `${d.getHours().toString().padStart(2,'0')}:${d.getMinutes().toString().padStart(2,'0')}:${d.getSeconds().toString().padStart(2,'0')}`;
   const agent     = entry.agentId ? agentsById[entry.agentId] : null;
-  const name      = agent ? agent.name : null;
-  const nameColor = agent ? _agentColorFor(agent) : null;
   const textColor = _eventTypeColor(entry.type);
   const text      = entry.msg || '';
   const item      = document.createElement('div');
   item.className  = 'lf-item';
-  item.innerHTML  = name
-    ? `<span class="lf-ts">${ts}</span><span class="lf-agent" style="color:${nameColor}">${name}</span><span class="lf-text" style="color:${textColor}"> — ${text}</span>`
-    : `<span class="lf-ts">${ts}</span><span class="lf-text" style="color:${textColor}">${text}</span>`;
+  item.innerHTML  = `<span class="lf-ts">${ts}</span><span class="lf-text" style="color:${textColor}">${text}</span>`;
   feed.insertBefore(item, feed.firstChild);
   while (feed.children.length > 20) feed.removeChild(feed.lastChild);
 }
