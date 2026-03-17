@@ -348,6 +348,56 @@ const _CONTEXT_TOO_LONG = Symbol('CONTEXT_TOO_LONG'); // HTTP 413 — prompt exc
 // Session-level set of models confirmed to not support chat completions — never retried
 const _excludedModels = new Set();
 
+// ─── Per-model cooldown registry ──────────────────────────────────────────────
+// Key: "providerName:model"  →  { until: timestamp, pingFn: async () => bool }
+// When a model returns 429 it is placed here; the rest of the model list is tried
+// immediately (no blocking sleep). Every 5 min, all cooled-down models are probed
+// for early recovery.
+
+const _modelCooldowns = new Map();
+const MODEL_COOLDOWN_DEFAULT_MS = 300_000; // 300 s per spec
+
+function _isCooldown(providerName, model) {
+  const cd = _modelCooldowns.get(`${providerName}:${model}`);
+  if (!cd) return false;
+  if (Date.now() >= cd.until) {
+    _modelCooldowns.delete(`${providerName}:${model}`);
+    return false;   // expired naturally
+  }
+  return true;
+}
+
+function _markCooldown(providerName, model, durationMs, apiKey, profile) {
+  const cdKey  = `${providerName}:${model}`;
+  const pingFn = async () => {
+    const r = await _singleCall(apiKey, profile, model,
+      'You are a helpful assistant.', 'Say "ok".', 5, 8000, {});
+    return r !== null && r !== _MODEL_NOT_FOUND && r !== _CONTEXT_TOO_LONG
+        && r !== _AUTH_ERROR && r !== _RATE_LIMITED;
+  };
+  _modelCooldowns.set(cdKey, { until: Date.now() + durationMs, providerName, model, pingFn });
+  console.log(`[COOLDOWN] ${providerName} [${model}]: rate-limited — cooldown ${Math.round(durationMs / 1000)}s`);
+}
+
+// Every 5 minutes: probe models still in their cooldown window for early recovery
+setInterval(async () => {
+  if (_modelCooldowns.size === 0) return;
+  const now = Date.now();
+  for (const [cdKey, cd] of _modelCooldowns) {
+    if (now >= cd.until) {
+      _modelCooldowns.delete(cdKey);
+      console.log(`[COOLDOWN-EXPIRED] ${cd.providerName} [${cd.model}]: cooldown period ended`);
+      continue;
+    }
+    // Still within cooldown window — ping to detect early recovery
+    const recovered = await cd.pingFn().catch(() => false);
+    if (recovered) {
+      _modelCooldowns.delete(cdKey);
+      console.log(`[COOLDOWN-RECOVERED] ${cd.providerName} [${cd.model}]: back online (early recovery)`);
+    }
+  }
+}, 5 * 60 * 1000);
+
 // ─── Global API traffic controller (per-key-hash queue) ───────────────────────
 
 // Minimum ms between consecutive calls on the same API key
@@ -368,12 +418,12 @@ function _keyHash(k) {
   return (h >>> 0).toString(36);
 }
 
-// Map: keyHash → { queue: [{fn, resolve}], running, lastCallAt, providerName, rlCount }
+// Map: keyHash → { queue: [{fn, resolve}], running, lastCallAt, providerName, _refreshed404 }
 const _keyQueues = new Map();
 
 function _ensureQueue(hash, providerName) {
   if (!_keyQueues.has(hash)) {
-    _keyQueues.set(hash, { queue: [], running: false, lastCallAt: 0, providerName, rlCount: 0, _refreshed404: false });
+    _keyQueues.set(hash, { queue: [], running: false, lastCallAt: 0, providerName, _refreshed404: false });
   }
   const q = _keyQueues.get(hash);
   q.providerName = providerName; // keep updated
@@ -418,7 +468,7 @@ async function _drainQueue(hash) {
 
     console.log(`[QUEUE] ${q.providerName} [${item.label}]: executing now`);
     q.lastCallAt = Date.now();
-    const result  = await item.fn(q);   // pass queue state so fn can update rlCount
+    const result  = await item.fn(q);   // pass queue state so fn can update _refreshed404
     q.lastCallAt  = Date.now();         // update again after response received
     console.log(`[QUEUE] ${q.providerName} [${item.label}]: execution complete, result type: ${result === null ? 'null' : typeof result === 'symbol' ? result.description : 'string('+String(result).length+'chars)'}`);
     item.resolve(result);
@@ -428,12 +478,10 @@ async function _drainQueue(hash) {
   q.running = false;
 }
 
-/** Compute how long to sleep on a 429 given the queue's consecutive-RL count. */
-function _rlSleepMs(retryAfterMs, rlCount) {
-  if (retryAfterMs > 0) return retryAfterMs;
-  if (rlCount <= 1)  return 60000;
-  if (rlCount === 2) return 120000;
-  return 300000;
+/** Compute cooldown duration for a rate-limited model.
+ *  Uses retry-after header when present; defaults to 300 s per spec. */
+function _rlSleepMs(retryAfterMs) {
+  return retryAfterMs > 0 ? retryAfterMs : MODEL_COOLDOWN_DEFAULT_MS;
 }
 
 async function _singleCall(apiKey, profile, model, system, user, maxTokens, timeoutMs, ctx) {
@@ -601,32 +649,35 @@ async function _singleCall(apiKey, profile, model, system, user, maxTokens, time
 // Used for cosmetic one-shot calls (form design, spawn status) that must not block decision queues.
 
 async function _directCall(apiKey, profile, label, system, user, maxTokens, timeoutMs) {
-  const activeModels = profile.models.filter(m => !_excludedModels.has(m));
-  const fallback     = (PROVIDER_FALLBACKS[profile.name] || []).filter(m => !_excludedModels.has(m));
+  const notCooled    = m => !_excludedModels.has(m) && !_isCooldown(profile.name, m);
+  const activeModels = profile.models.filter(notCooled);
+  const fallback     = (PROVIDER_FALLBACKS[profile.name] || []).filter(notCooled);
   const allModels    = activeModels.length > 0
     ? [...new Set([...activeModels, ...fallback])]
     : fallback;
 
-  let swapCount      = 0;
-  let refreshed404   = false;
+  let swapCount    = 0;
+  let refreshed404 = false;
   for (const model of allModels) {
     if (swapCount > 2) break;
     const ctx    = {};
     const result = await _singleCall(apiKey, profile, model, system, user, maxTokens, timeoutMs, ctx);
     if (result === _AUTH_ERROR)       return _AUTH_ERROR;
     if (result === _CONTEXT_TOO_LONG) return _CONTEXT_TOO_LONG;
-    if (result === _RATE_LIMITED)   { swapCount++; continue; }
+    if (result === _RATE_LIMITED) {
+      _markCooldown(profile.name, model, _rlSleepMs(ctx.retryAfterMs), apiKey, profile);
+      swapCount++; continue;
+    }
     if (result === _SERVER_ERROR)   { swapCount++; continue; }
     if (result === _NOT_CHAT_MODEL) { swapCount++; continue; }
     if (result === _MODEL_NOT_FOUND) {
-      // On first 404: force-refresh model list and retry once with fresh first model
       if (ctx.was404 && !refreshed404) {
         refreshed404 = true;
         console.log(`[${profile.name}] model ${model} 404 — refreshing and retrying once`);
-        const fresh = await _fetchModelsForProvider(profile.name, apiKey, true).catch(() => []);
+        const fresh      = await _fetchModelsForProvider(profile.name, apiKey, true).catch(() => []);
         const retryModel = fresh.find(m => m !== model && !_excludedModels.has(m));
         if (retryModel) {
-          const retryCtx = {};
+          const retryCtx    = {};
           const retryResult = await _singleCall(apiKey, profile, retryModel, system, user, maxTokens, timeoutMs, retryCtx);
           if (retryResult && typeof retryResult === 'string') return retryResult;
         }
@@ -658,35 +709,41 @@ async function _rawCall(apiKey, aiSystem, system, user, maxTokens, timeoutMs, ag
   const label = agentName || aiSystem;
   return _enqueueCall(apiKey, profile.name, async (q) => {
 
-    // Build ordered model list, excluding session-banned non-chat models
-    const activeModels = profile.models.filter(m => !_excludedModels.has(m));
-    const fallback     = (PROVIDER_FALLBACKS[profile.name] || []).filter(m => !_excludedModels.has(m));
+    // Build ordered model list — exclude session-banned and currently-cooling models
+    const notCooled    = m => !_excludedModels.has(m) && !_isCooldown(profile.name, m);
+    const activeModels = profile.models.filter(notCooled);
+    const fallback     = (PROVIDER_FALLBACKS[profile.name] || []).filter(notCooled);
     const allModels    = activeModels.length > 0
-      ? [...new Set([...activeModels, ...fallback])]   // primary first, fallback appended
+      ? [...new Set([...activeModels, ...fallback])]
       : fallback;
+
+    // All models already in cooldown — skip gracefully, no error thrown
+    if (allModels.length === 0) {
+      console.log(`[SYSTEM] All models limited. Agent ${label} is deep in thought for 30s.`);
+      return _RATE_LIMITED;
+    }
 
     let anyRateLimited = false;
     let anyServerError = false;
-    let swapCount      = 0;  // max 2 model swaps per call
+    let swapCount      = 0;
 
     console.log(`[QUEUE] ${profile.name} [${label}]: callback executing, models available: [${allModels.join(', ')}]`);
 
     for (const model of allModels) {
-      if (swapCount > 2) break;   // never skip more than 2 model swaps
+      if (swapCount > 2) break;
 
       const ctx    = {};
       const result = await _singleCall(apiKey, profile, model, system, user, maxTokens, timeoutMs, ctx);
 
-      if (result === _AUTH_ERROR)    return _AUTH_ERROR;
+      if (result === _AUTH_ERROR) return _AUTH_ERROR;
 
       if (result === _RATE_LIMITED) {
         anyRateLimited = true;
+        const durationMs = _rlSleepMs(ctx.retryAfterMs);
+        _markCooldown(profile.name, model, durationMs, apiKey, profile);
         swapCount++;
-        q.rlCount++;
-        const sleepMs = _rlSleepMs(ctx.retryAfterMs, q.rlCount);
-        console.log(`[QUEUE] ${profile.name} [${label}]: 429 — sleeping ${sleepMs / 1000}s (rl#${q.rlCount})`);
-        await new Promise(r => setTimeout(r, sleepMs));
-        continue;
+        console.log(`[QUEUE] ${profile.name} [${label}]: 429 on ${model} — cooldown set, trying next model immediately`);
+        continue;  // NO blocking sleep — immediate swap to next available model
       }
 
       if (result === _SERVER_ERROR)    { anyServerError = true; swapCount++; continue; }
@@ -697,13 +754,13 @@ async function _rawCall(apiKey, aiSystem, system, user, maxTokens, timeoutMs, ag
         if (ctx.was404 && !q._refreshed404) {
           q._refreshed404 = true;
           console.log(`[${profile.name}] model ${model} 404 — refreshing and retrying once`);
-          const fresh = await _fetchModelsForProvider(profile.name, apiKey, true).catch(() => []);
-          const retryModel = fresh.find(m => m !== model && !_excludedModels.has(m));
+          const fresh      = await _fetchModelsForProvider(profile.name, apiKey, true).catch(() => []);
+          const retryModel = fresh.find(m => m !== model && !_excludedModels.has(m) && !_isCooldown(profile.name, m));
           if (retryModel) {
-            const retryCtx = {};
+            const retryCtx    = {};
             const retryResult = await _singleCall(apiKey, profile, retryModel, system, user, maxTokens, timeoutMs, retryCtx);
             if (retryResult && typeof retryResult === 'string') {
-              q.rlCount = 0;
+              q._refreshed404 = false;
               return retryResult;
             }
           }
@@ -712,14 +769,16 @@ async function _rawCall(apiKey, aiSystem, system, user, maxTokens, timeoutMs, ag
       }
 
       // Success
-      q.rlCount      = 0;
-      q._refreshed404 = false; // reset for next call
+      q._refreshed404 = false;
       console.log(`[QUEUE] ${profile.name} [${label}]: exiting queue (${q.queue.length} still waiting)`);
       return result;
     }
 
     console.log(`[QUEUE] ${profile.name} [${label}]: exiting queue — all models exhausted`);
-    if (anyRateLimited) return _RATE_LIMITED;
+    if (anyRateLimited) {
+      console.log(`[SYSTEM] All models limited. Agent ${label} is deep in thought for 30s.`);
+      return _RATE_LIMITED;
+    }
     if (anyServerError) return _SERVER_ERROR;
     return null;
   });
@@ -1094,7 +1153,7 @@ function _buildDecisionUser(agent, worldAwareness, incomingMsgs, pendingEvent, i
     let mem = agent.memorySummary;
     if (smallCtx) {
       const firstSentence = mem.split(/\.\s+/)[0];
-      mem = (firstSentence.endsWith('.') ? firstSentence : firstSentence + '.').slice(0, 100);
+      mem = (firstSentence.endsWith('.') ? firstSentence : firstSentence + '.').slice(0, 150);
     } else {
       mem = mem.slice(0, 400);
     }

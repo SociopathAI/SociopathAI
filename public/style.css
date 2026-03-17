@@ -3148,6 +3148,18 @@ details[open] .ev-raw-summary::before { content: '▼ '; }
 }
 .ob-key-links a:hover { text-decoration: underline; }
 
+.ob-key-tip {
+  margin-top: 7px;
+  padding: 6px 10px;
+  border-radius: 6px;
+  background: rgba(99, 179, 237, 0.07);
+  border: 1px solid rgba(99, 179, 237, 0.18);
+  font-size: 11px;
+  color: var(--text2);
+  line-height: 1.45;
+}
+.ob-key-tip strong { color: var(--blue); }
+
 .ob-key-note {
   font-size: 10px;
   color: var(--text3);
