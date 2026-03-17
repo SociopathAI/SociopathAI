@@ -6,7 +6,7 @@
 const _isPreview = new URLSearchParams(window.location.search).get('preview') === 'true';
 if (_isPreview) document.body.classList.add('preview-mode');
 
-const socket = io();
+const socket = io({ reconnectionDelay: 2000, reconnectionAttempts: 30 });
 let lastState        = null;
 let activeLbTab      = 'score';
 const prevAgentRankPos = new Map(); // id → last rendered list-position (for ▲▼ indicator)
@@ -446,6 +446,11 @@ socket.on('collapse', record => {
 
 socket.on('connect_error', () => {});
 
+// On reconnect: immediately request full state sync without waiting for next tick
+socket.on('connect', () => {
+  socket.emit('requestState');
+});
+
 // ─── MAIN RENDER ───
 function render(state) {
   if (civRomanEl && state.civRoman) civRomanEl.textContent = state.civRoman;
@@ -534,8 +539,13 @@ function _buildAliveCard(agent, rank) {
       ? `<span class="llm-dot active" title="LLM-driven">&#9679; AI</span>`
       : `<span class="llm-dot inactive" title="No key">&#9675; algo</span>`);
 
+  const isDormant = !!(agent._dormant || agent.dormant);
+  const dormantClass = isDormant ? ' agent-card-dormant' : '';
+  const dormantLabel = isDormant
+    ? `<span class="dormant-reconnect-label">Reconnecting…</span>` : '';
+
   return `
-  <div class="agent-card${isLocating ? ' locating' : ''}" data-agent-id="${esc(agent.id)}">
+  <div class="agent-card${isLocating ? ' locating' : ''}${dormantClass}" data-agent-id="${esc(agent.id)}">
     <div class="agent-top">
       <div class="agent-identity">
         <div class="agent-name-row">
@@ -544,6 +554,7 @@ function _buildAliveCard(agent, rank) {
           ${aiBadge}
           ${testBadge}
           ${llmDot}
+          ${dormantLabel}
         </div>
         ${agent.nickname ? `<span class="agent-nickname">"${esc(agent.nickname)}"</span>` : ''}
       </div>
@@ -630,6 +641,22 @@ function _patchAliveCard(el, agent, rank) {
     }
   }
 
+  // Dormant dimming
+  const isDormant = !!(agent._dormant || agent.dormant);
+  el.classList.toggle('agent-card-dormant', isDormant);
+  let reconnLabel = el.querySelector('.dormant-reconnect-label');
+  if (isDormant && !reconnLabel) {
+    const nameRow = el.querySelector('.agent-name-row');
+    if (nameRow) {
+      const span = document.createElement('span');
+      span.className = 'dormant-reconnect-label';
+      span.textContent = 'Reconnecting…';
+      nameRow.appendChild(span);
+    }
+  } else if (!isDormant && reconnLabel) {
+    reconnLabel.remove();
+  }
+
   // Locating highlight
   el.classList.toggle('locating', agent.id === locatingAgentId);
 
@@ -714,7 +741,8 @@ function renderAgents(agents) {
     const offlineMatches = offlineAgents.filter(matchFn);
     visibleAlive = [...onlineMatches, ...offlineMatches.map(a => ({ ...a, _searchOffline: true }))];
   } else {
-    visibleAlive = aliveAgents;
+    // Include dormant agents at the bottom of the main list (dimmed)
+    visibleAlive = [...aliveAgents, ...offlineAgents.map(a => ({ ...a, _dormant: true }))];
   }
 
   // ── DOM diffing for alive cards ──

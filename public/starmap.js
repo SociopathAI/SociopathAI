@@ -336,12 +336,15 @@ class Starmap {
     // Handle transitions for existing active nodes
     for (const [id, nd] of this.nodes) {
       if (dormantIds.has(id)) {
-        // Agent just went dormant → start fade-out, remove from active nodes
-        if (!this._dormantFades.has(id)) {
-          this._dormantFades.set(id, { x: nd.x, y: nd.y, t: now, agent: nd.agent });
+        // Agent went dormant — keep node visible but mark as dormant (grayed out)
+        nd.dormant = true;
+      } else if (activeIds.has(id)) {
+        // Agent came back online — clear dormant flag
+        if (nd.dormant) {
+          nd.dormant = false;
+          this._awakingNodes.set(id, now);
         }
-        this.nodes.delete(id);
-      } else if (!activeIds.has(id)) {
+      } else {
         // Truly dead (or missing) — death anim
         if (!this._dormantFades.has(id)) {
           this.deathAnims.push({ x: nd.x, y: nd.y, t: now });
@@ -360,9 +363,9 @@ class Starmap {
       if (now - wakeT > 1500) this._awakingNodes.delete(id);
     }
 
-    // Add/refresh active nodes
+    // Add/refresh active nodes (including dormant — they stay on map, grayed out)
     for (const a of state.agents) {
-      if (!a.alive || a.dormant) continue;
+      if (!a.alive) continue;
 
       if (!this.nodes.has(a.id)) {
         // Waking from dormant → prefer _lastPositions, then dormant fade pos, then edge spawn
@@ -375,14 +378,16 @@ class Starmap {
         if (dormFade) this._dormantFades.delete(a.id);
         this.nodes.set(a.id, {
           x: p.x, y: p.y, vx: 0, vy: 0,
-          agent: a, bloomT: now, signals: [],
+          agent: a, dormant: !!a.dormant, bloomT: now, signals: [],
           _wanderAngle: Math.random() * Math.PI * 2,
           _wanderNextT: performance.now() + 500 + Math.random() * 2000,
         });
         // Trigger fade-in animation for returning agents
         if (isReturning) this._awakingNodes.set(a.id, now);
       } else {
-        this.nodes.get(a.id).agent = a;
+        const nd = this.nodes.get(a.id);
+        nd.agent = a;
+        nd.dormant = !!a.dormant;
       }
     }
 
@@ -640,6 +645,8 @@ class Starmap {
 
     for (let i = 0; i < all.length; i++) {
       const nd = all[i];
+      // Dormant agents are frozen in place — no physics, no wander
+      if (nd.dormant) { nd.vx = 0; nd.vy = 0; continue; }
       let fx = 0, fy = 0;
 
       for (let j = 0; j < all.length; j++) {
@@ -1157,7 +1164,9 @@ class Starmap {
       const wakeA   = wakeT ? Math.min(1, (t - wakeT) / 1500) : 1;
 
       ctx.save();
-      ctx.globalAlpha = (dimmed ? 0.18 : 1) * isoA * wakeA;
+      const dormAlpha = nd.dormant ? 0.28 : 1;
+      ctx.globalAlpha = (dimmed ? 0.18 : dormAlpha) * isoA * wakeA;
+      if (nd.dormant) ctx.filter = 'grayscale(85%)';
 
       if (a.visualForm && a.visualForm.shapes && a.visualForm.shapes.length) {
         this._drawNodeForm(ctx, nd, a, t);

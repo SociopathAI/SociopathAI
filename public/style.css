@@ -323,6 +323,28 @@ body {
   opacity: 0.55;
   border-color: var(--border);
 }
+.agent-card.agent-card-dormant {
+  opacity: 0.45;
+  filter: grayscale(60%);
+  border-color: var(--border);
+  pointer-events: none;
+}
+.dormant-reconnect-label {
+  font-size: 9px;
+  font-weight: 700;
+  color: #8899aa;
+  background: rgba(100,120,140,0.15);
+  border: 1px solid rgba(100,120,140,0.3);
+  border-radius: 4px;
+  padding: 1px 5px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  animation: dormant-blink 1.8s ease-in-out infinite;
+}
+@keyframes dormant-blink {
+  0%, 100% { opacity: 0.5; }
+  50%       { opacity: 1; }
+}
 .offline-badge {
   font-size: 9px;
   font-weight: 700;

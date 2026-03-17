@@ -561,6 +561,11 @@ io.on('connection', (socket) => {
     console.log(`[Socket] ${socket.id.slice(0,8)} identified as agent "${agent.name}" (${agentId.slice(0,8)})`);
   });
 
+  // Client requests immediate state sync (e.g. after reconnect)
+  socket.on('requestState', () => {
+    socket.emit('state', sim.getFullState());
+  });
+
   socket.on('disconnect', () => {
     const agentId = socketAgentMap.get(socket.id);
     socketAgentMap.delete(socket.id);
