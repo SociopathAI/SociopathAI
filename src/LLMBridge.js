@@ -213,6 +213,11 @@ const MODEL_CACHE_TTL = 3600000; // 1 hour
 // Map: providerName → { models: string[], fetchedAt: number }
 const _modelCache = new Map();
 
+// ─── OpenRouter free model pool ────────────────────────────────────────────────
+// Updated by _fetchOpenRouterModels; used for auto-swap ordering.
+let _orFreePool    = [];   // model IDs sorted by context_length desc
+let _orFreePoolKey = null; // the OR API key that populated the pool
+
 // ── Provider-specific preferred-order lists (for ranking only — not whitelists) ──
 
 const _GROQ_PREFERRED   = ['llama-3.3-70b-versatile', 'llama-3.1-8b-instant', 'llama3-70b-8192', 'gemma2-9b-it'];
@@ -271,10 +276,37 @@ async function _fetchOpenRouterModels(apiKey) {
   });
   if (!res.ok) return null;
   const data = await res.json();
-  const all  = (data.data || []).map(m => m.id).filter(_isUsableChatModel);
-  const free = all.filter(id => id.toLowerCase().includes(':free'));
-  const paid = all.filter(id => !id.toLowerCase().includes(':free'));
-  return [...free, ...paid];
+  const allModels = (data.data || []).filter(m => _isUsableChatModel(m.id));
+
+  // Filter truly free models by actual pricing fields, sort by context_length desc
+  const freeModels = allModels
+    .filter(m => {
+      const p = m.pricing || {};
+      return p.prompt === '0' && p.completion === '0';
+    })
+    .sort((a, b) => (b.context_length || 0) - (a.context_length || 0));
+
+  const freeIds = freeModels.map(m => m.id);
+
+  // Update module-level free pool for auto-swap
+  _orFreePool    = freeIds;
+  _orFreePoolKey = apiKey;
+
+  if (freeIds.length > 0) {
+    console.log(`[AUTO-SCAN] Found ${freeIds.length} free models. Top pick: ${freeIds[0]}`);
+  } else {
+    console.log('[AUTO-SCAN] No truly-free models found on OpenRouter.');
+  }
+
+  // Paid models appended at lower priority
+  const paidIds = allModels
+    .filter(m => {
+      const p = m.pricing || {};
+      return !(p.prompt === '0' && p.completion === '0');
+    })
+    .map(m => m.id);
+
+  return [...freeIds, ...paidIds];
 }
 
 async function _fetchUnknownProviderModels(apiKey, baseUrl) {
@@ -393,6 +425,22 @@ function _markCooldown(providerName, model, durationMs, apiKey, profile) {
   _modelCooldowns.set(cdKey, { until: Date.now() + durationMs, providerName, model, pingFn });
   console.log(`[COOLDOWN] ${providerName} [${model}]: rate-limited — cooldown ${Math.round(durationMs / 1000)}s`);
 }
+
+// Every hour: re-scan OpenRouter for the latest free model pool
+setInterval(async () => {
+  const orKey = _orFreePoolKey || globalKeys.get('OpenRouter');
+  if (!orKey) return;
+  try {
+    await _fetchOpenRouterModels(orKey);
+    // Update model cache so the refreshed free pool is used by future calls
+    const cached = _modelCache.get('OpenRouter');
+    if (cached) {
+      _modelCache.set('OpenRouter', { models: [..._orFreePool], fetchedAt: Date.now() });
+    }
+  } catch (e) {
+    console.warn('[AUTO-SCAN] Hourly OpenRouter scan failed:', e.message);
+  }
+}, 3600000);
 
 // Every 5 minutes: probe models still in their cooldown window for early recovery
 setInterval(async () => {
@@ -684,7 +732,12 @@ async function _directCall(apiKey, profile, label, system, user, maxTokens, time
     if (result === _CONTEXT_TOO_LONG) return _CONTEXT_TOO_LONG;
     if (result === _RATE_LIMITED) {
       _markCooldown(profile.name, model, _rlSleepMs(ctx.retryAfterMs), apiKey, profile);
-      swapCount++; continue;
+      swapCount++;
+      const nextModel = allModels[allModels.indexOf(model) + 1];
+      if (profile.name === 'OpenRouter' && nextModel) {
+        console.log(`[AUTO-SWAP] ${model} limited. Switching to ${nextModel} automatically.`);
+      }
+      continue;
     }
     if (result === _SERVER_ERROR)   { swapCount++; continue; }
     if (result === _NOT_CHAT_MODEL) { swapCount++; continue; }
@@ -695,6 +748,9 @@ async function _directCall(apiKey, profile, label, system, user, maxTokens, time
         const fresh      = await _fetchModelsForProvider(profile.name, apiKey, true).catch(() => []);
         const retryModel = fresh.find(m => m !== model && !_excludedModels.has(m));
         if (retryModel) {
+          if (profile.name === 'OpenRouter') {
+            console.log(`[AUTO-SWAP] ${model} limited. Switching to ${retryModel} automatically.`);
+          }
           const retryCtx    = {};
           const retryResult = await _singleCall(apiKey, profile, retryModel, system, user, maxTokens, timeoutMs, retryCtx);
           if (retryResult && typeof retryResult === 'string') return retryResult;
@@ -760,6 +816,10 @@ async function _rawCall(apiKey, aiSystem, system, user, maxTokens, timeoutMs, ag
         const durationMs = _rlSleepMs(ctx.retryAfterMs);
         _markCooldown(profile.name, model, durationMs, apiKey, profile);
         swapCount++;
+        const nextModel = allModels[allModels.indexOf(model) + 1];
+        if (profile.name === 'OpenRouter' && nextModel) {
+          console.log(`[AUTO-SWAP] ${model} limited. Switching to ${nextModel} automatically.`);
+        }
         console.log(`[QUEUE] ${profile.name} [${label}]: 429 on ${model} — cooldown set, trying next model immediately`);
         continue;  // NO blocking sleep — immediate swap to next available model
       }
@@ -775,6 +835,9 @@ async function _rawCall(apiKey, aiSystem, system, user, maxTokens, timeoutMs, ag
           const fresh      = await _fetchModelsForProvider(profile.name, apiKey, true).catch(() => []);
           const retryModel = fresh.find(m => m !== model && !_excludedModels.has(m) && !_isCooldown(profile.name, m));
           if (retryModel) {
+            if (profile.name === 'OpenRouter') {
+              console.log(`[AUTO-SWAP] ${model} limited. Switching to ${retryModel} automatically.`);
+            }
             const retryCtx    = {};
             const retryResult = await _singleCall(apiKey, profile, retryModel, system, user, maxTokens, timeoutMs, retryCtx);
             if (retryResult && typeof retryResult === 'string') {
@@ -1605,3 +1668,5 @@ async function resolveProvider(apiKey, aiSystem, agentName) {
 }
 
 module.exports = { decideAction, conductDialogue, deliverMessage, respondToMessage, summarizeMemory, designVisualForm, designConnection, designWorldObject, parseObjectActions, extractBehaviorVerb, designNovelEffect, sanitizeForDisplay, setGlobalKey, getKey, getSpawnStatus, resolveProvider, detectKeyProvider, clearProbeCache };
+
+console.log('=== AUTO-MODEL DETECTION ACTIVE ===');
