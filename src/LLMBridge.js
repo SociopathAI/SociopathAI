@@ -651,7 +651,7 @@ async function _singleCall(apiKey, profile, model, system, user, maxTokens, time
 
   } catch (e) {
     if (e?.name === 'AbortError') {
-      console.warn(`[${ts()}] [LLM-TIMEOUT] ${profile.name} [${model}]: aborted after ${timeoutMs}ms`);
+      console.warn(`[${ts()}] [TIMEOUT] Waited ${timeoutMs}ms but no response. Skipping turn.`);
     } else {
       console.error(`[${ts()}] [LLM-ERR] ${profile.name} [${model}]: ${e?.name} — ${e?.message || String(e)}`);
       if (e?.stack) console.error(`[LLM-ERR-STACK]`, e.stack.split('\n').slice(0, 3).join(' | '));
@@ -1202,7 +1202,7 @@ async function decideAction(agent, world, allAgents, worldAwareness, incomingMsg
   }
 
   const system    = _decisionSystem(agent);
-  const timeoutMs = 14000;
+  const timeoutMs = Math.floor(Math.random() * 40000) + 50000;
   const user      = _buildDecisionUser(agent, worldAwareness, incomingMsgs, pendingEvent, isFirst, preemptSmall);
 
   let text = await _rawCall(key, agent.aiSystem, system, user, 400, timeoutMs, agent.name);
