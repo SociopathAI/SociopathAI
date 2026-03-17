@@ -451,6 +451,14 @@ socket.on('connect', () => {
   socket.emit('requestState');
 });
 
+// On actual tab/browser close: signal server immediately so agent exits cleanly
+window.addEventListener('beforeunload', () => {
+  const myAgents = SocioLLM.loadMyAgents ? Object.keys(SocioLLM.loadMyAgents()) : [];
+  for (const agentId of myAgents) {
+    socket.emit('agentExit', { agentId });
+  }
+});
+
 // ─── MAIN RENDER ───
 function render(state) {
   if (civRomanEl && state.civRoman) civRomanEl.textContent = state.civRoman;

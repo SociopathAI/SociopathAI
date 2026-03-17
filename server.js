@@ -131,7 +131,10 @@ function detectAiSystem(req) {
 
 const app = express();
 const httpServer = http.createServer(app);
-const io = new Server(httpServer);
+const io = new Server(httpServer, {
+  pingInterval: 25000,  // send ping every 25s (keeps background tabs alive)
+  pingTimeout:  60000,  // wait 60s for pong before declaring disconnect
+});
 
 app.use(express.json());
 
@@ -536,6 +539,7 @@ app.get('/api/civilizations', (req, res) => {
 // ── Socket → Agent mapping (in-memory only, resets on server restart) ──
 // Lets us detect which agent belongs to which browser tab.
 const socketAgentMap = new Map();   // socketId → agentId
+const disconnectTimers = new Map(); // agentId → setTimeout handle (30s grace period)
 
 io.on('connection', (socket) => {
   socket.emit('state', sim.getFullState());
@@ -554,6 +558,12 @@ io.on('connection', (socket) => {
       if (aid === agentId && sid !== socket.id) socketAgentMap.delete(sid);
     }
     socketAgentMap.set(socket.id, agentId);
+    // Cancel any pending grace-period dormant timer for this agent
+    if (disconnectTimers.has(agentId)) {
+      clearTimeout(disconnectTimers.get(agentId));
+      disconnectTimers.delete(agentId);
+      console.log(`[SYSTEM] Agent ${agent.name} reconnected within grace period - staying active`);
+    }
     // Wake agent if they were dormant
     if (agent.dormant) {
       sim.wakeAgent(agent, agent.apiKey);
@@ -566,6 +576,20 @@ io.on('connection', (socket) => {
     socket.emit('state', sim.getFullState());
   });
 
+  // Tab/browser actually closed — set dormant immediately
+  socket.on('agentExit', ({ agentId }) => {
+    if (!agentId || typeof agentId !== 'string') return;
+    const agent = sim.agents.find(a => a.id === agentId);
+    const name = agent ? agent.name : agentId.slice(0, 8);
+    console.log(`[SYSTEM] Tab closed - Agent ${name} exiting world.`);
+    // Cancel any grace timer and go dormant right away
+    if (disconnectTimers.has(agentId)) {
+      clearTimeout(disconnectTimers.get(agentId));
+      disconnectTimers.delete(agentId);
+    }
+    sim.setDormant(agentId);
+  });
+
   socket.on('disconnect', () => {
     const agentId = socketAgentMap.get(socket.id);
     socketAgentMap.delete(socket.id);
@@ -573,13 +597,19 @@ io.on('connection', (socket) => {
     // Broadcast updated online count
     setTimeout(() => io.emit('chat:online', socketAgentMap.size), 50);
     if (!agentId) return;
-    // Only mark dormant if no other socket is still tracking this agent
+    // Only start grace period if no other socket is still tracking this agent
     const stillConnected = [...socketAgentMap.values()].includes(agentId);
-    if (!stillConnected) {
+    if (!stillConnected && !disconnectTimers.has(agentId)) {
       const agent = sim.agents.find(a => a.id === agentId);
       const name = agent ? agent.name : agentId.slice(0, 8);
-      console.log(`[SYSTEM] Agent ${name} disconnected - cleaning up UI.`);
-      sim.setDormant(agentId);
+      console.log(`[SYSTEM] Agent ${name} connection lost - waiting 30s before dormant`);
+      const timer = setTimeout(() => {
+        disconnectTimers.delete(agentId);
+        // Still no reconnect — go dormant now
+        const stillConn = [...socketAgentMap.values()].includes(agentId);
+        if (!stillConn) sim.setDormant(agentId);
+      }, 30000);
+      disconnectTimers.set(agentId, timer);
     }
   });
 

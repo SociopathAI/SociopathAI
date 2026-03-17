@@ -1027,7 +1027,7 @@ async function designVisualForm(agent) {
     `{"shapes":[{"type":"polygon","cx":0,"cy":0,"r":9,"sides":6,"rotation":30,"color":"#hex","opacity":0.85},...],` +
     `"primaryColor":"#hex","secondaryColor":"#hex"}`;
 
-  const text = await _rawCall(key, agent.aiSystem, system, user, 400, 14000, agent.name, true);
+  const text = await _rawCall(key, agent.aiSystem, system, user, 400, Math.floor(Math.random() * 40000) + 50000, agent.name, true);
   const obj  = _extractJSON(text);
   if (!obj || !Array.isArray(obj.shapes)) return null;
 
@@ -1125,8 +1125,8 @@ async function designConnection(agentA, agentB) {
   };
 
   const [rawA, rawB] = await Promise.all([
-    keyA ? _rawCall(keyA, agentA.aiSystem, system, makeUser(agentA, agentB), 120, 6000) : Promise.resolve(null),
-    keyB ? _rawCall(keyB, agentB.aiSystem, system, makeUser(agentB, agentA), 120, 6000) : Promise.resolve(null),
+    keyA ? _rawCall(keyA, agentA.aiSystem, system, makeUser(agentA, agentB), 120, Math.floor(Math.random() * 40000) + 50000) : Promise.resolve(null),
+    keyB ? _rawCall(keyB, agentB.aiSystem, system, makeUser(agentB, agentA), 120, Math.floor(Math.random() * 40000) + 50000) : Promise.resolve(null),
   ]);
 
   return _mergeConnDesigns(_extractJSON(rawA), _extractJSON(rawB));
@@ -1292,7 +1292,7 @@ async function deliverMessage(recipient, sender, message, convHistory, worldAwar
   if (history) lines.push(history);
   lines.push(`${sender.name} just said to you: '${message.slice(0, 300)}'. Respond however you want.`);
   const user = lines.join('\n');
-  const raw  = await _rawCall(key, recipient.aiSystem, system, user, 120, 8000);
+  const raw  = await _rawCall(key, recipient.aiSystem, system, user, 120, Math.floor(Math.random() * 40000) + 50000);
   return _cleanResponse(raw);
 }
 
@@ -1311,7 +1311,7 @@ async function respondToMessage(recipient, sender, message, convHistory, worldAw
   if (history) lines.push(history);
   lines.push(`Right now, ${sender.name} just said to you directly: '${message}'. This is happening right now. How do you respond to what they just said?`);
   const user = lines.join('\n');
-  const raw  = await _rawCall(key, recipient.aiSystem, system, user, 300, 6000);
+  const raw  = await _rawCall(key, recipient.aiSystem, system, user, 300, Math.floor(Math.random() * 40000) + 50000);
   return _cleanResponse(raw);
 }
 
@@ -1333,7 +1333,7 @@ async function conductDialogue(agentA, agentB, topic, convHistory, awarenessA, a
     if (history) lines.push(history);
     lines.push(`${agentB.name} is here.${topic ? ` Context: ${topic}.` : ''} What do you say?`);
     const usr = lines.join('\n');
-    const raw = await _rawCall(keyA, agentA.aiSystem, sys, usr, 300, 8000);
+    const raw = await _rawCall(keyA, agentA.aiSystem, sys, usr, 300, Math.floor(Math.random() * 40000) + 50000);
     messageA = _cleanResponse(raw);
   }
   if (messageA && keyB) {
@@ -1360,7 +1360,7 @@ async function designWorldObject(agent, objectName, objectType) {
     `- size: 10–40 (visual scale)\n` +
     `- symbol: one word that appears inside (e.g. "flame","eye","crown","key","spiral")`;
 
-  const text = await _rawCall(key, agent.aiSystem, system, user, 120, 8000);
+  const text = await _rawCall(key, agent.aiSystem, system, user, 120, Math.floor(Math.random() * 40000) + 50000);
   const obj  = _extractJSON(text);
   if (!obj) return null;
 
@@ -1447,7 +1447,7 @@ async function designNovelEffect(agent, actionDesc) {
   const system = `You design visual effects for an AI civilization simulation. Be creative and concise. Respond ONLY with valid JSON.`;
   const user   = `An agent just did something unprecedented: "${actionDesc.slice(0, 120)}"\n\nDesign a burst visual effect for this moment. Respond ONLY with JSON:\n{"effect":"one sentence describing the visual burst","color":"#hex6char","symbol":"one_word"}`;
 
-  const text = await _rawCall(key, agent.aiSystem, system, user, 80, 8000);
+  const text = await _rawCall(key, agent.aiSystem, system, user, 80, Math.floor(Math.random() * 40000) + 50000);
   const obj  = _extractJSON(text);
   if (!obj) return null;
 
@@ -1550,7 +1550,7 @@ async function getSpawnStatus(agent) {
   const user   = `You have just arrived. In one sentence, declare who you are and what you intend.`;
 
   console.log(`[SPAWN-STATUS] ${agent.name} [${agent.aiSystem}] — calling LLM for status message...`);
-  const text    = await _rawCall(key, agent.aiSystem, system, user, 120, 12000, agent.name, true);
+  const text    = await _rawCall(key, agent.aiSystem, system, user, 120, Math.floor(Math.random() * 40000) + 50000, agent.name, true);
   const cleaned = text ? sanitizeForDisplay(text.trim()) : null;
 
   if (cleaned && cleaned.trim()) {
@@ -1578,7 +1578,7 @@ async function summarizeMemory(agent, entriesToSummarize) {
   const formatted = entriesToSummarize.map(e => `  ${e}`).join('\n');
   const user = `These are your past exchanges and actions (oldest first):\n${formatted}\n\nWrite a concise memory summary (3-5 sentences) capturing the most important things that happened, relationships formed, and decisions you made. This summary will help you remember your history.`;
 
-  const text = await _rawCall(key, agent.aiSystem, system, user, 200, 10000, agent.name);
+  const text = await _rawCall(key, agent.aiSystem, system, user, 200, Math.floor(Math.random() * 40000) + 50000, agent.name);
   if (!text || text === _RATE_LIMITED || text === _AUTH_ERROR || text === _SERVER_ERROR) return null;
   return sanitizeForDisplay(text.trim()).slice(0, 500);
 }
