@@ -380,13 +380,11 @@ class Simulation {
 
   // ── Per-agent independent timer system ────────────────────────────────────────
 
-  /** Returns the decision interval in ms based on current active agent count. */
+  /** Returns a random decision interval between 120 s and 180 s (2–3 min).
+   *  Called fresh each cycle so every agent gets a different wait time,
+   *  naturally spreading API calls over time. */
   _getDecisionInterval() {
-    const n = this.agents.filter(a => a.alive && !a.dormant).length;
-    if (n <= 3)  return 30000;
-    if (n <= 6)  return 40000;
-    if (n <= 10) return 50000;
-    return 60000;
+    return 120000 + Math.floor(Math.random() * 60000); // 120 000–180 000 ms
   }
 
   /** Start an independent LLM timer for an agent with random jitter. */
