@@ -94,6 +94,7 @@ async function initDb() {
     ALTER TABLE agents ADD COLUMN IF NOT EXISTS api_status       VARCHAR(20) DEFAULT 'ok';
     ALTER TABLE agents ADD COLUMN IF NOT EXISTS backoff_until    BIGINT  DEFAULT 0;
     ALTER TABLE agents ADD COLUMN IF NOT EXISTS model_name       VARCHAR(100);
+    ALTER TABLE agents ADD COLUMN IF NOT EXISTS last_seen_at     BIGINT  DEFAULT 0;
   `);
 
   // Indexes (safe to run repeatedly)

@@ -88,6 +88,7 @@ class Agent {
     // --- Dormant state (owner disconnected) ---
     this.dormant      = false;
     this.dormantSince = null;
+    this.lastSeenAt   = 0;   // Unix ms timestamp of last dormant transition
 
     // --- Status message (from spawn LLM call or updated via regular speech) ---
     this.statusMessage = null;
@@ -345,6 +346,7 @@ Agent.restore = function restore(data) {
   agent.pendingLLMDecision  = null;
   agent.dormant             = data.dormant      || false;
   agent.dormantSince        = data.dormantSince || null;
+  agent.lastSeenAt          = data.lastSeenAt   || 0;
   agent.visualForm          = data.visualForm   ? JSON.parse(JSON.stringify(data.visualForm))   : null;
   agent.formModifiers       = JSON.parse(JSON.stringify(data.formModifiers || []));
   agent.statusMessage       = data.statusMessage || null;

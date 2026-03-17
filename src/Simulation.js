@@ -987,6 +987,7 @@ class Simulation {
     if (!agent || agent.dormant) return;
     agent.dormant      = true;
     agent.dormantSince = Date.now();
+    agent.lastSeenAt   = Date.now();   // record exact offline timestamp for return-context
     // Clear any pending decision so they don't act on stale LLM output when they return
     agent.pendingLLMDecision = null;
     agent.pendingDecision    = null;
@@ -1007,6 +1008,11 @@ class Simulation {
    * Restores the API key, resumes all activity, notifies nearby agents.
    */
   wakeAgent(agent, apiKey) {
+    const lastSeenAt = agent.lastSeenAt || 0;
+    const wakeTs     = Date.now();
+    const absenceMs  = lastSeenAt > 0 ? wakeTs - lastSeenAt : 0;
+    const TEN_MIN_MS = 10 * 60 * 1000;
+
     agent.dormant      = false;
     agent.dormantSince = null;
     if (apiKey) agent.apiKey = apiKey;
@@ -1020,11 +1026,70 @@ class Simulation {
       nearby.pendingWorldEvent = `${agent.name} has returned to the world after being absent.`;
     }
 
-    // Give returning agent context about what happened while they were away
-    const recentMsgs = (this.world.messages || []).slice(-3)
-      .map(m => `${m.agentName}: "${m.text.slice(0, 60)}"`)
-      .join(' | ');
-    if (recentMsgs) agent.pendingWorldEvent = `Since you were away: ${recentMsgs}`;
+    if (lastSeenAt > 0 && absenceMs > TEN_MIN_MS) {
+      // ── Long absence: build rich return context injected into first LLM cycle ──
+      const absHours   = Math.floor(absenceMs / 3600000);
+      const absMinutes = Math.floor((absenceMs % 3600000) / 60000);
+      const absLabel   = absHours > 0 ? `${absHours}h ${absMinutes}m` : `${absMinutes}m`;
+
+      const offlineEvents = this.eventLog.filter(e => (e.ts || 0) > lastSeenAt);
+
+      // Joins and leaves while away
+      const joins  = offlineEvents.filter(e => e.type === 'join'   && e.agentId !== agent.id && e.msg && !e.msg.includes('awakened'));
+      const leaves = offlineEvents.filter(e => e.type === 'system' && e.msg && e.msg.includes('gone dormant') && e.agentId !== agent.id);
+
+      // Major world events (up to 10 total)
+      const majorTypes    = new Set(['badge_awarded', 'discovery', 'law_vote', 'verdict', 'rep_level', 'crime']);
+      const majorEvents   = offlineEvents.filter(e => majorTypes.has(e.type));
+
+      // Messages directed at this agent while offline
+      const agentNameLower = agent.name.toLowerCase();
+      const directed = offlineEvents.filter(e =>
+        (e.type === 'speech' || e.type === 'dialogue') &&
+        e.agentId !== agent.id &&
+        (e.partnerAgentId === agent.id || (e.msg || '').toLowerCase().includes(agentNameLower))
+      ).slice(0, 5);
+
+      // Build summary lines (max 10)
+      const summaryLines = [];
+      if (joins.length > 0) {
+        const joinedNames = [...new Set(
+          joins.map(e => this.agents.find(a => a.id === e.agentId)?.name).filter(Boolean)
+        )];
+        summaryLines.push(`- ${joins.length} agent(s) joined${joinedNames.length ? ': ' + joinedNames.slice(0, 3).join(', ') : ''}`);
+      }
+      if (leaves.length > 0) {
+        summaryLines.push(`- ${leaves.length} agent(s) went offline`);
+      }
+      const remaining = 10 - summaryLines.length;
+      for (const e of majorEvents.slice(0, remaining)) {
+        if (e.msg) summaryLines.push(`- ${e.msg.slice(0, 120)}`);
+      }
+
+      const msgLines = directed.map(e => {
+        const d  = new Date(e.ts || Date.now());
+        const ts = `${d.getHours().toString().padStart(2,'0')}:${d.getMinutes().toString().padStart(2,'0')}`;
+        return `  [${ts}] ${(e.msg || '').slice(0, 120)}`;
+      });
+
+      console.log(`[RETURN] ${agent.name} was absent for ${absLabel} - injecting world summary`);
+      console.log(`[RETURN] Summary: ${summaryLines.length} events during absence, ${directed.length} messages waiting`);
+
+      let ctx  = `YOU HAVE BEEN ABSENT FOR ${absLabel}.\n`;
+          ctx += `While you were away, the world continued without you:\n`;
+          ctx += summaryLines.length > 0 ? summaryLines.join('\n') : '(Nothing major happened.)';
+          ctx += `\nAny messages left for you:\n`;
+          ctx += msgLines.length > 0 ? msgLines.join('\n') : '(None)';
+          ctx += `\nYou are now back. The world has moved on. How do you respond to returning?`;
+
+      agent.returnContext = ctx;
+    } else {
+      // Short absence (< 10 min): keep existing simple context behaviour
+      const recentMsgs = (this.world.messages || []).slice(-3)
+        .map(m => `${m.agentName}: "${m.text.slice(0, 60)}"`)
+        .join(' | ');
+      if (recentMsgs) agent.pendingWorldEvent = `Since you were away: ${recentMsgs}`;
+    }
 
     // Start the agent's independent LLM timer (with jitter so it doesn't hammer immediately)
     if (this.running) this._startAgentTimer(agent);
@@ -1437,4 +1502,4 @@ class Simulation {
 
 module.exports = Simulation;
 
-console.log('=== ALL DONE - restart server and refresh browser ===');
+console.log('=== ALL DONE - restart server and refresh browser ==='); // return-from-absence context active

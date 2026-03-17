@@ -1215,6 +1215,13 @@ function _buildDecisionUser(agent, worldAwareness, incomingMsgs, pendingEvent, i
     lines.push(`You have been alive for ${formatDuration(ageMs)}.`);
   }
 
+  // Return-from-absence context — injected once on first cycle after reconnect, then cleared
+  // Comes after identity/education (which lives in system prompt), never before it
+  if (agent.returnContext) {
+    lines.push(agent.returnContext);
+    agent.returnContext = null;
+  }
+
   // World awareness — ultra-diet for small-context models (~1 event)
   let wa = worldAwareness || '';
   if (smallCtx) wa = wa.slice(0, 800);

@@ -112,6 +112,7 @@ function _serializeAgent(a) {
     // Key fingerprint only — raw key is NEVER persisted
     keyHash:           a.keyHash   || null,
     keySalt:           a.keySalt   || null,
+    lastSeenAt:        a.lastSeenAt || 0,
     isTestBot:         a.isTestBot || false,
     // Visual form
     visualForm:        a.visualForm   ? JSON.parse(JSON.stringify(a.visualForm))   : null,
