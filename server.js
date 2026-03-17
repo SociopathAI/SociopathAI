@@ -576,6 +576,9 @@ io.on('connection', (socket) => {
     // Only mark dormant if no other socket is still tracking this agent
     const stillConnected = [...socketAgentMap.values()].includes(agentId);
     if (!stillConnected) {
+      const agent = sim.agents.find(a => a.id === agentId);
+      const name = agent ? agent.name : agentId.slice(0, 8);
+      console.log(`[SYSTEM] Agent ${name} disconnected - cleaning up UI.`);
       sim.setDormant(agentId);
     }
   });
