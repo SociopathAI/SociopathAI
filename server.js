@@ -562,7 +562,7 @@ io.on('connection', (socket) => {
     if (disconnectTimers.has(agentId)) {
       clearTimeout(disconnectTimers.get(agentId));
       disconnectTimers.delete(agentId);
-      console.log(`[SYSTEM] Agent ${agent.name} reconnected within grace period - staying active`);
+      console.log(`[SYSTEM] Agent ${agent.name} reconnected - still active.`);
     }
     // Wake agent if they were dormant
     if (agent.dormant) {
@@ -602,13 +602,13 @@ io.on('connection', (socket) => {
     if (!stillConnected && !disconnectTimers.has(agentId)) {
       const agent = sim.agents.find(a => a.id === agentId);
       const name = agent ? agent.name : agentId.slice(0, 8);
-      console.log(`[SYSTEM] Agent ${name} connection lost - waiting 30s before dormant`);
+      console.log(`[SYSTEM] Socket lost - keeping ${name} active for 60s grace period.`);
       const timer = setTimeout(() => {
         disconnectTimers.delete(agentId);
         // Still no reconnect — go dormant now
         const stillConn = [...socketAgentMap.values()].includes(agentId);
         if (!stillConn) sim.setDormant(agentId);
-      }, 30000);
+      }, 60000);
       disconnectTimers.set(agentId, timer);
     }
   });
