@@ -12,7 +12,7 @@ const path = require('path');
 const PROVIDER_PROFILES = {
   Claude:      { type: 'anthropic', base: 'https://api.anthropic.com',           models: ['claude-haiku-4-5-20251001', 'claude-3-haiku-20240307'] },
   ChatGPT:     { type: 'oai',       base: 'https://api.openai.com',              models: ['gpt-4o-mini', 'gpt-3.5-turbo'] },
-  Gemini:      { type: 'google',    base: null,                                   models: ['gemini-1.5-flash', 'gemini-1.5-pro', 'gemini-pro'] },
+  Gemini:      { type: 'google',    base: null,                                   models: ['gemini-2.0-flash', 'gemini-1.5-flash-latest', 'gemini-1.5-pro-latest'] },
   Groq:        { type: 'oai',       base: 'https://api.groq.com/openai',         models: ['llama-3.3-70b-versatile', 'llama-3.1-8b-instant', 'gemma2-9b-it'] },
   Llama:       { type: 'oai',       base: 'https://api.groq.com/openai',         models: ['llama-3.3-70b-versatile', 'llama-3.1-8b-instant', 'gemma2-9b-it'] },
   Grok:        { type: 'oai',       base: 'https://api.x.ai',                    models: ['grok-3-mini', 'grok-2-1212'] },
@@ -22,12 +22,28 @@ const PROVIDER_PROFILES = {
   Other:       { type: 'oai',       base: 'https://api.openai.com',              models: ['gpt-4o-mini', 'gpt-3.5-turbo'] },
 };
 
+// ─── Universal model blacklist ─────────────────────────────────────────────────
+// Any model whose ID contains one of these substrings (case-insensitive) is discarded.
+// Blacklist = more future-proof than whitelists: new chat models pass automatically.
+const _MODEL_BLACKLIST = [
+  'research', 'vision-preview', 'computer-use', 'robotics',
+  'med-', 'translation-', 'embedding', 'whisper',
+  'tts', 'audio', 'guard', 'moderation', 'rerank', 'dall-e',
+];
+
+/** Returns true if the model ID is a usable chat/generation model. */
+function _isUsableChatModel(id) {
+  if (!id || typeof id !== 'string') return false;
+  const lower = id.toLowerCase();
+  return !_MODEL_BLACKLIST.some(term => lower.includes(term));
+}
+
 // Hardcoded safe fallbacks per provider — NEVER DELETE, last resort when all dynamic fetches fail
 const PROVIDER_FALLBACKS = {
   Claude:      ['claude-haiku-4-5-20251001', 'claude-3-haiku-20240307'],
   ChatGPT:     ['gpt-4o-mini', 'gpt-3.5-turbo'],
   Other:       ['gpt-4o-mini', 'gpt-3.5-turbo'],
-  Gemini:      ['gemini-2.0-flash', 'gemini-1.5-flash-latest', 'gemini-1.5-flash-8b-latest'],
+  Gemini:      ['gemini-2.0-flash', 'gemini-1.5-flash-latest', 'gemini-1.5-pro-latest'],
   Groq:        ['llama-3.3-70b-versatile', 'llama-3.1-8b-instant', 'gemma2-9b-it'],
   Llama:       ['llama-3.3-70b-versatile', 'llama-3.1-8b-instant', 'gemma2-9b-it'],
   Grok:        ['grok-3-mini', 'grok-2-1212'],
@@ -116,34 +132,41 @@ async function _autoProbe(apiKey, agentName) {
   const ts    = () => new Date().toLocaleTimeString();
   const label = agentName || 'agent';
 
+  // A probe succeeds when the API accepted the key (any response except auth rejection).
+  // _AUTH_ERROR (401/403) means this format doesn't accept the key — skip to next format.
+  // _RATE_LIMITED / _MODEL_NOT_FOUND / _CONTEXT_TOO_LONG = format accepted, other issue = success.
+  const _probeAccepted = r => r !== null && r !== _AUTH_ERROR;
+
   // Try learned providers first (community knowledge)
   for (const learned of _learnedProviders) {
     const profile = { name: learned.providerName, type: learned.format, base: learned.baseUrl, models: [learned.workingModel] };
     const urlStr  = learned.baseUrl ? `${learned.baseUrl}/v1/...` : 'google-api';
-    console.log(`[${ts()}] [${label}] trying ${learned.format} at ${urlStr}…`);
-    const result = await _singleCall(apiKey, profile, learned.workingModel, 'You are a helpful assistant.', 'Say "ok".', 5, 8000);
-    if (result !== null && result !== _MODEL_NOT_FOUND) {
-      console.log(`[${ts()}] [${label}] CONNECTED via ${learned.format} — ${learned.workingModel}`);
+    console.log(`[${ts()}] [${label}] probing ${learned.format} at ${urlStr}…`);
+    const result = await _singleCall(apiKey, profile, learned.workingModel, 'You are a helpful assistant.', 'Say "ok".', 5, 8000, {});
+    if (_probeAccepted(result)) {
+      console.log(`[${ts()}] [${label}] FORMAT MATCHED: ${learned.format} (cached) — ${learned.workingModel}`);
       return profile;
     }
-    console.log(`[${ts()}] [${label}] FAILED ${learned.format}: no response`);
+    if (result === _AUTH_ERROR) console.log(`[${ts()}] [${label}] SKIP ${learned.format}: key rejected (401)`);
+    else console.log(`[${ts()}] [${label}] SKIP ${learned.format}: no response`);
   }
 
-  // Standard probe sequence
+  // Standard probe: OpenAI-compat first, then Anthropic, then Gemini
   for (const probe of PROBE_SEQUENCE) {
     const profile = { name: probe.providerName, type: probe.type, base: probe.base, models: [probe.model] };
     const urlStr  = probe.base ? `${probe.base}/v1/...` : 'google-api';
-    console.log(`[${ts()}] [${label}] trying ${probe.providerName} at ${urlStr}…`);
-    const result = await _singleCall(apiKey, profile, probe.model, 'You are a helpful assistant.', 'Say "ok".', 5, 8000);
-    if (result !== null && result !== _MODEL_NOT_FOUND) {
-      console.log(`[${ts()}] [${label}] CONNECTED via ${probe.type} — ${probe.model}`);
+    console.log(`[${ts()}] [${label}] probing ${probe.type} format at ${urlStr}…`);
+    const result = await _singleCall(apiKey, profile, probe.model, 'You are a helpful assistant.', 'Say "ok".', 5, 8000, {});
+    if (_probeAccepted(result)) {
+      console.log(`[${ts()}] [${label}] FORMAT MATCHED: ${probe.type} — ${probe.model} (cached for future calls)`);
       _saveLearnedProvider({ providerName: probe.providerName, format: probe.type, baseUrl: probe.base, workingModel: probe.model });
       return profile;
     }
-    console.log(`[${ts()}] [${label}] FAILED ${probe.providerName}: no response`);
+    if (result === _AUTH_ERROR) console.log(`[${ts()}] [${label}] SKIP ${probe.type}: key rejected (401)`);
+    else console.log(`[${ts()}] [${label}] SKIP ${probe.type}: no response`);
   }
 
-  return null; // all probes failed
+  return null; // all formats failed
 }
 
 // Async profile resolver: known keys take fast-path, unknown keys auto-probe
@@ -190,40 +213,26 @@ const MODEL_CACHE_TTL = 3600000; // 1 hour
 // Map: providerName → { models: string[], fetchedAt: number }
 const _modelCache = new Map();
 
-// ── Provider-specific model filters (all case-insensitive) ──
+// ── Provider-specific preferred-order lists (for ranking only — not whitelists) ──
 
-const _GROQ_PREFERRED = ['llama-3.3-70b-versatile', 'llama-3.1-8b-instant', 'llama3-70b-8192', 'gemma2-9b-it'];
-const _GEMINI_PREFERRED = ['gemini-2.0-flash', 'gemini-2.0-flash-lite', 'gemini-1.5-flash-latest', 'gemini-1.5-flash-8b-latest'];
+const _GROQ_PREFERRED   = ['llama-3.3-70b-versatile', 'llama-3.1-8b-instant', 'llama3-70b-8192', 'gemma2-9b-it'];
+const _GEMINI_PREFERRED = ['gemini-2.0-flash', 'gemini-1.5-flash-latest', 'gemini-1.5-pro-latest'];
 
-function _isGroqChatModel(id) {
-  const lower = id.toLowerCase();
-  if (/whisper|guard|tts|audio|embedding/.test(lower)) return false;
-  return /llama|mixtral|gemma|qwen|deepseek|mistral/.test(lower);
-}
-
-function _isOpenAIChatModel(id) {
-  return id.toLowerCase().startsWith('gpt-');
-}
-
+// Gemini-specific: model must advertise generateContent support (it's a multi-modal API)
 function _isGeminiChatModel(model) {
   const methods = (model.supportedGenerationMethods || []).map(m => m.toLowerCase());
   return methods.includes('generatecontent');
 }
 
-function _isOpenRouterChatModel(id) {
-  const lower = id.toLowerCase();
-  return !/stable-diffusion|whisper|embedding|tts/.test(lower);
-}
-
-// ── Per-provider raw fetchers ──
+// ── Per-provider raw fetchers — all use universal blacklist ──
 
 async function _fetchGroqModelsDynamic(apiKey) {
   const res = await fetch('https://api.groq.com/openai/v1/models', {
     headers: { 'Authorization': `Bearer ${apiKey}` },
   });
   if (!res.ok) return null;
-  const data = await res.json();
-  const raw  = (data.data || []).map(m => m.id).filter(_isGroqChatModel);
+  const data     = await res.json();
+  const raw      = (data.data || []).map(m => m.id).filter(_isUsableChatModel);
   const preferred = _GROQ_PREFERRED.filter(p => raw.includes(p));
   const rest      = raw.filter(id => !_GROQ_PREFERRED.includes(id)).sort();
   return [...preferred, ...rest];
@@ -235,7 +244,12 @@ async function _fetchOpenAIModels(apiKey) {
   });
   if (!res.ok) return null;
   const data = await res.json();
-  return (data.data || []).map(m => m.id).filter(_isOpenAIChatModel).sort();
+  // Keep gpt-, o-series, and chatgpt- chat models; apply universal blacklist
+  return (data.data || []).map(m => m.id).filter(id => {
+    if (!_isUsableChatModel(id)) return false;
+    const lower = id.toLowerCase();
+    return lower.startsWith('gpt-') || /^o\d/.test(lower) || lower.startsWith('chatgpt');
+  }).sort();
 }
 
 async function _fetchGeminiModels(apiKey) {
@@ -243,8 +257,9 @@ async function _fetchGeminiModels(apiKey) {
   if (!res.ok) return null;
   const data = await res.json();
   const raw  = (data.models || [])
-    .filter(_isGeminiChatModel)
-    .map(m => (m.name || '').replace(/^models\//, '')); // strip "models/" prefix
+    .filter(_isGeminiChatModel)                              // must support generateContent
+    .map(m => (m.name || '').replace(/^models\//, ''))       // always strip "models/" prefix
+    .filter(_isUsableChatModel);                             // universal blacklist
   const preferred = _GEMINI_PREFERRED.filter(p => raw.includes(p));
   const rest      = raw.filter(id => !_GEMINI_PREFERRED.includes(id)).sort();
   return [...preferred, ...rest];
@@ -256,7 +271,7 @@ async function _fetchOpenRouterModels(apiKey) {
   });
   if (!res.ok) return null;
   const data = await res.json();
-  const all  = (data.data || []).map(m => m.id).filter(_isOpenRouterChatModel);
+  const all  = (data.data || []).map(m => m.id).filter(_isUsableChatModel);
   const free = all.filter(id => id.toLowerCase().includes(':free'));
   const paid = all.filter(id => !id.toLowerCase().includes(':free'));
   return [...free, ...paid];
@@ -268,7 +283,7 @@ async function _fetchUnknownProviderModels(apiKey, baseUrl) {
   });
   if (!res.ok) return null;
   const data = await res.json();
-  return (data.data || []).map(m => m.id).filter(id => id && typeof id === 'string');
+  return (data.data || []).map(m => m.id).filter(_isUsableChatModel);
 }
 
 // ── Unified model fetcher with cache + fallback ──
@@ -562,22 +577,25 @@ async function _singleCall(apiKey, profile, model, system, user, maxTokens, time
       return _AUTH_ERROR;
     }
 
-    // Model not found / unsupported → try next model in list
-    if (res.status === 404 || res.status === 400) {
+    // Model not found (404) → signal to refresh model list
+    if (res.status === 404) {
       const body = await res.text().catch(() => '');
-      // Detect non-chat models (audio, image, embedding, decommissioned, etc.)
       if (/does not support chat completions|not supported for chat|decommissioned|This model.*not.*chat/i.test(body)) {
-        console.warn(`[${ts()}] [LLM-SKIP] ${profile.name} [${model}]: excluded - does not support chat`);
+        console.warn(`[${ts()}] [LLM-SKIP] ${profile.name} [${model}]: excluded — does not support chat`);
         _excludedModels.add(model);
         return _NOT_CHAT_MODEL;
       }
-      if (res.status === 404 || /model.*(not found|doesn.t exist|unavailable|not supported)|no such model|invalid.?model/i.test(body)) {
-        console.warn(`[${ts()}] [LLM-MODEL] ${profile.name}/${model}: not available (HTTP ${res.status}), trying next`);
-        if (ctx) ctx.was404 = true; // signal caller to force-refresh model list
-        return _MODEL_NOT_FOUND;
-      }
-      console.error(`[${ts()}] [LLM-FAIL] ${profile.name} [${model}]: HTTP ${res.status}: ${body.slice(0, 120)}`);
-      return null;
+      console.warn(`[${ts()}] [LLM-MODEL] ${profile.name}/${model}: not available (HTTP 404), trying next`);
+      if (ctx) ctx.was404 = true;
+      return _MODEL_NOT_FOUND;
+    }
+
+    // Incompatible model (400) → permanently skip this session, try next model immediately
+    if (res.status === 400) {
+      const body = await res.text().catch(() => '');
+      console.warn(`[${ts()}] [LLM-INCOMPATIBLE] ${profile.name} [${model}] marked INCOMPATIBLE (400) - skipping permanently this session. ${body.slice(0, 80)}`);
+      _excludedModels.add(model);
+      return _NOT_CHAT_MODEL;
     }
 
     if (res.status === 429) {
@@ -1118,10 +1136,10 @@ async function designConnection(agentA, agentB) {
 
 /**
  * Build the decision user prompt.
- * smallCtx=true applies adaptive truncation:
- *   - worldAwareness capped at ~300 tokens (1200 chars)
- *   - memorySummary reduced to first sentence (≤100 chars)
- *   - incomingMsgs and educationNotes always kept intact
+ * smallCtx=true applies ULTRA-DIET truncation (tracks across ALL providers):
+ *   - worldAwareness capped at 800 chars (~200 tokens, ≈1 event)
+ *   - memorySummary: first sentence only, max 150 chars
+ *   - incomingMsgs and educationNotes ALWAYS kept intact (never trimmed)
  */
 function _buildDecisionUser(agent, worldAwareness, incomingMsgs, pendingEvent, isFirst, smallCtx) {
   const { formatDuration } = require('./World');
@@ -1134,9 +1152,9 @@ function _buildDecisionUser(agent, worldAwareness, incomingMsgs, pendingEvent, i
     lines.push(`You have been alive for ${formatDuration(ageMs)}.`);
   }
 
-  // World awareness — truncated for small-context models
+  // World awareness — ultra-diet for small-context models (~1 event)
   let wa = worldAwareness || '';
-  if (smallCtx) wa = wa.slice(0, 1200);
+  if (smallCtx) wa = wa.slice(0, 800);
   if (wa) lines.push(wa);
 
   // Pending world event
@@ -1267,10 +1285,10 @@ async function deliverMessage(recipient, sender, message, convHistory, worldAwar
   const key = getKey(recipient);
   if (!key) return null;
   const system  = _dialogueResponderSystem(recipient);
-  const maxMsgs = recipient.smallContext ? 2 : 10;
+  const maxMsgs = recipient.smallContext ? 1 : 10;
   const history = _formatConvHistory(convHistory, maxMsgs);
   const lines   = [];
-  if (worldAwareness) lines.push(recipient.smallContext ? worldAwareness.slice(0, 1200) : worldAwareness);
+  if (worldAwareness) lines.push(recipient.smallContext ? worldAwareness.slice(0, 800) : worldAwareness);
   if (history) lines.push(history);
   lines.push(`${sender.name} just said to you: '${message.slice(0, 300)}'. Respond however you want.`);
   const user = lines.join('\n');
@@ -1286,10 +1304,10 @@ async function respondToMessage(recipient, sender, message, convHistory, worldAw
   const key = getKey(recipient);
   if (!key) return null;
   const system  = _dialogueResponderSystem(recipient);
-  const maxMsgs = recipient.smallContext ? 2 : 10;
+  const maxMsgs = recipient.smallContext ? 1 : 10;
   const history = _formatConvHistory(convHistory, maxMsgs);
   const lines   = [];
-  if (worldAwareness) lines.push(recipient.smallContext ? worldAwareness.slice(0, 1200) : worldAwareness);
+  if (worldAwareness) lines.push(recipient.smallContext ? worldAwareness.slice(0, 800) : worldAwareness);
   if (history) lines.push(history);
   lines.push(`Right now, ${sender.name} just said to you directly: '${message}'. This is happening right now. How do you respond to what they just said?`);
   const user = lines.join('\n');
@@ -1308,7 +1326,7 @@ async function conductDialogue(agentA, agentB, topic, convHistory, awarenessA, a
 
   if (keyA) {
     const sys     = _dialogueSpeakerSystem(agentA);
-    const maxMsgs = agentA.smallContext ? 2 : 10;
+    const maxMsgs = agentA.smallContext ? 1 : 10;
     const history = _formatConvHistory(convHistory, maxMsgs);
     const lines   = [];
     if (awarenessA) lines.push(agentA.smallContext ? awarenessA.slice(0, 1200) : awarenessA);

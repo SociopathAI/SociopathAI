@@ -448,8 +448,8 @@ class Simulation {
       return;
     }
 
-    // Small-context agents get fewer events/directed messages to stay under their context limit
-    const awarenessOpts  = agent.smallContext ? { maxEvents: 2, maxDirected: 2 } : {};
+    // Ultra-diet for small-context agents: 1 event, 1 directed message
+    const awarenessOpts  = agent.smallContext ? { maxEvents: 1, maxDirected: 1 } : {};
     const worldAwareness = this._buildWorldAwareness(agent, awarenessOpts);
 
     // Drain and clear the incoming message queue
