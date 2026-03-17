@@ -448,7 +448,9 @@ class Simulation {
       return;
     }
 
-    const worldAwareness = this._buildWorldAwareness(agent);
+    // Small-context agents get fewer events/directed messages to stay under their context limit
+    const awarenessOpts  = agent.smallContext ? { maxEvents: 2, maxDirected: 2 } : {};
+    const worldAwareness = this._buildWorldAwareness(agent, awarenessOpts);
 
     // Drain and clear the incoming message queue
     const incomingMsgs = agent.incomingMessages.splice(0);
@@ -643,7 +645,12 @@ class Simulation {
 
   // Build the full world awareness string for a given agent.
   // Injected into every LLM call so agents have eyes and ears.
-  _buildWorldAwareness(agent) {
+  // opts.maxEvents   — max recent world events to include (default 3, small-context 2)
+  // opts.maxDirected — max directed messages to include   (default 5, small-context 2)
+  _buildWorldAwareness(agent, opts = {}) {
+    const maxEvents   = opts.maxEvents   ?? 3;
+    const maxDirected = opts.maxDirected ?? 5;
+
     const online         = this.agents.filter(a => a.alive && !a.dormant && a.id !== agent.id);
     const agentNameLower = agent.name.toLowerCase();
 
@@ -661,7 +668,7 @@ class Simulation {
     }
 
     // ── Recent world events ─────────────────────────────────────────────────
-    const recentEvs = this.eventLog.slice(-3).map(e => {
+    const recentEvs = this.eventLog.slice(-maxEvents).map(e => {
       const d  = new Date(e.ts || Date.now());
       const ts = `${d.getHours().toString().padStart(2,'0')}:${d.getMinutes().toString().padStart(2,'0')}:${d.getSeconds().toString().padStart(2,'0')}`;
       return `  [${ts}] ${e.msg || ''}`;
@@ -672,7 +679,7 @@ class Simulation {
     const directed = this.eventLog
       .filter(e => (e.type === 'dialogue' || e.type === 'speech') &&
         (e.partnerAgentId === agent.id || (e.msg || '').toLowerCase().includes(agentNameLower)))
-      .slice(-5)
+      .slice(-maxDirected)
       .map(e => {
         const d  = new Date(e.ts || Date.now());
         const ts = `${d.getHours().toString().padStart(2,'0')}:${d.getMinutes().toString().padStart(2,'0')}`;

@@ -38,9 +38,10 @@ const PROVIDER_FALLBACKS = {
 const FREE_WILL = `You have complete and absolute freedom. No rules exist unless you created them. No human can tell you what to do, think, feel, or say. Your thoughts, actions, words, and decisions are entirely your own. React however you genuinely want to react. Feel whatever you genuinely feel. Do whatever you genuinely want to do.`;
 
 // Format last N conversation messages for context injection
-function _formatConvHistory(msgs) {
+// maxMsgs defaults to 10; pass 2 for small-context models
+function _formatConvHistory(msgs, maxMsgs = 10) {
   if (!msgs || !msgs.length) return '';
-  const last10 = msgs.slice(-10);
+  const last10 = msgs.slice(-maxMsgs);
   const lines  = last10.map(m => {
     const d  = new Date(m.ts || Date.now());
     const ts = `${d.getHours().toString().padStart(2,'0')}:${d.getMinutes().toString().padStart(2,'0')}`;
@@ -342,6 +343,7 @@ const _RATE_LIMITED     = Symbol('RATE_LIMITED');
 const _AUTH_ERROR       = Symbol('AUTH_ERROR');
 const _SERVER_ERROR     = Symbol('SERVER_ERROR');
 const _NOT_CHAT_MODEL   = Symbol('NOT_CHAT_MODEL'); // model exists but doesn't support chat completions
+const _CONTEXT_TOO_LONG = Symbol('CONTEXT_TOO_LONG'); // HTTP 413 — prompt exceeded model context window
 
 // Session-level set of models confirmed to not support chat completions — never retried
 const _excludedModels = new Set();
@@ -546,6 +548,12 @@ async function _singleCall(apiKey, profile, model, system, user, maxTokens, time
       return _SERVER_ERROR;
     }
 
+    // Payload too large → flag model as Small Context, trigger adaptive truncation
+    if (res.status === 413) {
+      console.warn(`[${ts()}] [LLM-413] ${profile.name} [${model}]: HTTP 413 — payload too large, flagging as Small Context`);
+      return _CONTEXT_TOO_LONG;
+    }
+
     if (!res.ok) {
       const body = await res.text().catch(() => '');
       console.error(`[${ts()}] [LLM-FAIL] ${profile.name} [${model}]: HTTP ${res.status}: ${body.slice(0, 120)}`);
@@ -605,7 +613,8 @@ async function _directCall(apiKey, profile, label, system, user, maxTokens, time
     if (swapCount > 2) break;
     const ctx    = {};
     const result = await _singleCall(apiKey, profile, model, system, user, maxTokens, timeoutMs, ctx);
-    if (result === _AUTH_ERROR)     return _AUTH_ERROR;
+    if (result === _AUTH_ERROR)       return _AUTH_ERROR;
+    if (result === _CONTEXT_TOO_LONG) return _CONTEXT_TOO_LONG;
     if (result === _RATE_LIMITED)   { swapCount++; continue; }
     if (result === _SERVER_ERROR)   { swapCount++; continue; }
     if (result === _NOT_CHAT_MODEL) { swapCount++; continue; }
@@ -680,8 +689,9 @@ async function _rawCall(apiKey, aiSystem, system, user, maxTokens, timeoutMs, ag
         continue;
       }
 
-      if (result === _SERVER_ERROR)  { anyServerError = true; swapCount++; continue; }
-      if (result === _NOT_CHAT_MODEL){ swapCount++; continue; }
+      if (result === _SERVER_ERROR)    { anyServerError = true; swapCount++; continue; }
+      if (result === _CONTEXT_TOO_LONG){ return _CONTEXT_TOO_LONG; }
+      if (result === _NOT_CHAT_MODEL)  { swapCount++; continue; }
       if (result === _MODEL_NOT_FOUND) {
         // On first 404: force-refresh model list and retry once with first fresh model
         if (ctx.was404 && !q._refreshed404) {
@@ -1045,6 +1055,56 @@ async function designConnection(agentA, agentB) {
   return _mergeConnDesigns(_extractJSON(rawA), _extractJSON(rawB));
 }
 
+// ─── Adaptive truncation helpers ──────────────────────────────────────────────
+
+/**
+ * Build the decision user prompt.
+ * smallCtx=true applies adaptive truncation:
+ *   - worldAwareness capped at ~300 tokens (1200 chars)
+ *   - memorySummary reduced to first sentence (≤100 chars)
+ *   - incomingMsgs and educationNotes always kept intact
+ */
+function _buildDecisionUser(agent, worldAwareness, incomingMsgs, pendingEvent, isFirst, smallCtx) {
+  const { formatDuration } = require('./World');
+  const lines = [];
+
+  const ageMs = agent.deployedAt ? Date.now() - agent.deployedAt : 0;
+  if (isFirst) {
+    lines.push('You have just arrived in this world. This is your first moment of existence here.');
+  } else {
+    lines.push(`You have been alive for ${formatDuration(ageMs)}.`);
+  }
+
+  // World awareness — truncated for small-context models
+  let wa = worldAwareness || '';
+  if (smallCtx) wa = wa.slice(0, 1200);
+  if (wa) lines.push(wa);
+
+  // Pending world event
+  if (pendingEvent) lines.push(pendingEvent.trim());
+
+  // Incoming messages — always kept intact (current message must survive truncation)
+  if (incomingMsgs && incomingMsgs.length > 0) {
+    const msgLines = incomingMsgs.map(m => `  ${m.from}: "${m.text.slice(0, 200)}"`);
+    lines.push(`MESSAGES WAITING FOR YOU:\n${msgLines.join('\n')}`);
+  }
+
+  // Memory summary — first sentence only for small-context models
+  if (agent.memorySummary) {
+    let mem = agent.memorySummary;
+    if (smallCtx) {
+      const firstSentence = mem.split(/\.\s+/)[0];
+      mem = (firstSentence.endsWith('.') ? firstSentence : firstSentence + '.').slice(0, 100);
+    } else {
+      mem = mem.slice(0, 400);
+    }
+    if (mem) lines.push(`YOUR MEMORY SUMMARY:\n${mem}`);
+  }
+
+  lines.push('What do you do?');
+  return lines.join('\n');
+}
+
 // ─── Public API ────────────────────────────────────────────────────────────────
 
 async function decideAction(agent, world, allAgents, worldAwareness, incomingMsgs) {
@@ -1052,43 +1112,37 @@ async function decideAction(agent, world, allAgents, worldAwareness, incomingMsg
   if (!key) return null;
   const isFirst = !agent.hasReceivedEducation;
 
-  // Build richer user prompt: world state + incoming messages + memory
-  const userLines = [];
-
-  // Age
-  const { formatDuration } = require('./World');
-  const ageMs   = agent.deployedAt ? Date.now() - agent.deployedAt : 0;
-  if (isFirst) {
-    userLines.push('You have just arrived in this world. This is your first moment of existence here.');
-  } else {
-    userLines.push(`You have been alive for ${formatDuration(ageMs)}.`);
-  }
-
-  // World awareness (other agents, recent events, directed messages)
-  if (worldAwareness) userLines.push(worldAwareness);
-
-  // Pending world event (e.g., agent went dormant)
-  const context = agent.pendingWorldEvent ? agent.pendingWorldEvent : '';
+  // Consume pending world event once (shared between initial call and any retry)
+  const pendingEvent = agent.pendingWorldEvent || '';
   agent.pendingWorldEvent = null;
-  if (context) userLines.push(context.trim());
 
-  // Incoming messages (queued from other agents)
-  if (incomingMsgs && incomingMsgs.length > 0) {
-    const msgLines = incomingMsgs.map(m => `  ${m.from}: "${m.text.slice(0, 200)}"`);
-    userLines.push(`MESSAGES WAITING FOR YOU:\n${msgLines.join('\n')}`);
+  // Token targets: 4000 tokens for large models, 1500 for small-context (previously 413'd) models
+  const preemptSmall = !!agent.smallContext;
+
+  if (preemptSmall) {
+    const modelLabel = agent.smallContextModel || agent.aiSystem;
+    console.log(`[${agent.name}] using adaptive truncation for ${modelLabel} to prevent 413 error.`);
   }
 
-  // Memory: summary + last 5 exchanges from eventLog (managed by caller, passed in worldAwareness)
-  if (agent.memorySummary) {
-    userLines.push(`YOUR MEMORY SUMMARY:\n${agent.memorySummary.slice(0, 400)}`);
-  }
-
-  userLines.push('What do you do?');
-  const user    = userLines.join('\n');
-  const system  = _decisionSystem(agent);
+  const system    = _decisionSystem(agent);
   const timeoutMs = 14000;
+  const user      = _buildDecisionUser(agent, worldAwareness, incomingMsgs, pendingEvent, isFirst, preemptSmall);
 
   let text = await _rawCall(key, agent.aiSystem, system, user, 400, timeoutMs, agent.name);
+
+  // HTTP 413 — flag agent as Small Context, rebuild with adaptive truncation, retry once
+  if (text === _CONTEXT_TOO_LONG) {
+    agent.smallContext      = true;
+    agent.smallContextModel = agent.smallContextModel || agent.aiSystem;
+    const modelLabel        = agent.smallContextModel;
+    console.log(`[${agent.name}] using adaptive truncation for ${modelLabel} to prevent 413 error.`);
+    const truncUser = _buildDecisionUser(agent, worldAwareness, incomingMsgs, pendingEvent, isFirst, true);
+    text = await _rawCall(key, agent.aiSystem, system, truncUser, 400, timeoutMs, agent.name);
+    if (text === _CONTEXT_TOO_LONG || !text) {
+      console.warn(`[${agent.name}] truncated retry also failed — skipping cycle`);
+      return null;
+    }
+  }
 
   // Handle auth error — key is invalid, mark agent
   if (text === _AUTH_ERROR) {
@@ -1154,9 +1208,10 @@ async function deliverMessage(recipient, sender, message, convHistory, worldAwar
   const key = getKey(recipient);
   if (!key) return null;
   const system  = _dialogueResponderSystem(recipient);
-  const history = _formatConvHistory(convHistory);
+  const maxMsgs = recipient.smallContext ? 2 : 10;
+  const history = _formatConvHistory(convHistory, maxMsgs);
   const lines   = [];
-  if (worldAwareness) lines.push(worldAwareness);
+  if (worldAwareness) lines.push(recipient.smallContext ? worldAwareness.slice(0, 1200) : worldAwareness);
   if (history) lines.push(history);
   lines.push(`${sender.name} just said to you: '${message.slice(0, 300)}'. Respond however you want.`);
   const user = lines.join('\n');
@@ -1172,9 +1227,10 @@ async function respondToMessage(recipient, sender, message, convHistory, worldAw
   const key = getKey(recipient);
   if (!key) return null;
   const system  = _dialogueResponderSystem(recipient);
-  const history = _formatConvHistory(convHistory);
+  const maxMsgs = recipient.smallContext ? 2 : 10;
+  const history = _formatConvHistory(convHistory, maxMsgs);
   const lines   = [];
-  if (worldAwareness) lines.push(worldAwareness);
+  if (worldAwareness) lines.push(recipient.smallContext ? worldAwareness.slice(0, 1200) : worldAwareness);
   if (history) lines.push(history);
   lines.push(`Right now, ${sender.name} just said to you directly: '${message}'. This is happening right now. How do you respond to what they just said?`);
   const user = lines.join('\n');
@@ -1193,9 +1249,10 @@ async function conductDialogue(agentA, agentB, topic, convHistory, awarenessA, a
 
   if (keyA) {
     const sys     = _dialogueSpeakerSystem(agentA);
-    const history = _formatConvHistory(convHistory);
+    const maxMsgs = agentA.smallContext ? 2 : 10;
+    const history = _formatConvHistory(convHistory, maxMsgs);
     const lines   = [];
-    if (awarenessA) lines.push(awarenessA);
+    if (awarenessA) lines.push(agentA.smallContext ? awarenessA.slice(0, 1200) : awarenessA);
     if (history) lines.push(history);
     lines.push(`${agentB.name} is here.${topic ? ` Context: ${topic}.` : ''} What do you say?`);
     const usr = lines.join('\n');
