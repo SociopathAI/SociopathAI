@@ -450,8 +450,10 @@ class Simulation {
     const awarenessOpts  = agent.smallContext ? { maxEvents: 1, maxDirected: 1 } : {};
     const worldAwareness = this._buildWorldAwareness(agent, awarenessOpts);
 
-    // Drain and clear the incoming message queue
-    const incomingMsgs = agent.incomingMessages.splice(0);
+    // Drain and clear the incoming message queue — drop messages from offline senders
+    const onlineNamesForQueue = new Set(this.agents.filter(a => a.alive && !a.dormant).map(a => a.name));
+    const incomingMsgs = agent.incomingMessages.splice(0)
+      .filter(m => onlineNamesForQueue.has(m.from));
 
     this._llmInFlight.add(agent.id);
     LLMBridge.decideAction(agent, this.world, this.agents, worldAwareness, incomingMsgs)
@@ -650,7 +652,9 @@ class Simulation {
     const maxDirected = opts.maxDirected ?? 5;
 
     const online         = this.agents.filter(a => a.alive && !a.dormant && a.id !== agent.id);
+    const onlineIds      = new Set(this.agents.filter(a => a.alive && !a.dormant).map(a => a.id));
     const agentNameLower = agent.name.toLowerCase();
+    const idToName       = new Map(this.agents.map(a => [a.id, a.name]));
 
     // ── Other agents present ────────────────────────────────────────────────
     let agentsBlock;
@@ -665,18 +669,22 @@ class Simulation {
       agentsBlock = `- Other agents present:\n${agentLines.join('\n')}`;
     }
 
-    // ── Recent world events ─────────────────────────────────────────────────
-    const recentEvs = this.eventLog.slice(-maxEvents).map(e => {
-      const d  = new Date(e.ts || Date.now());
-      const ts = `${d.getHours().toString().padStart(2,'0')}:${d.getMinutes().toString().padStart(2,'0')}:${d.getSeconds().toString().padStart(2,'0')}`;
-      return `  [${ts}] ${e.msg || ''}`;
-    });
+    // ── Recent world events (online agents only — offline agents invisible) ─
+    const recentEvs = this.eventLog
+      .filter(e => !e.agentId || onlineIds.has(e.agentId))
+      .slice(-maxEvents)
+      .map(e => {
+        const d  = new Date(e.ts || Date.now());
+        const ts = `${d.getHours().toString().padStart(2,'0')}:${d.getMinutes().toString().padStart(2,'0')}:${d.getSeconds().toString().padStart(2,'0')}`;
+        return `  [${ts}] ${e.msg || ''}`;
+      });
     const eventsBlock = `- Recent world events:\n${recentEvs.length ? recentEvs.join('\n') : '  (none yet)'}`;
 
-    // ── Messages directed at this agent ─────────────────────────────────────
+    // ── Messages directed at this agent (online senders only) ───────────────
     const directed = this.eventLog
       .filter(e => (e.type === 'dialogue' || e.type === 'speech') &&
-        (e.partnerAgentId === agent.id || (e.msg || '').toLowerCase().includes(agentNameLower)))
+        (e.partnerAgentId === agent.id || (e.msg || '').toLowerCase().includes(agentNameLower)) &&
+        (!e.agentId || onlineIds.has(e.agentId)))
       .slice(-maxDirected)
       .map(e => {
         const d  = new Date(e.ts || Date.now());
@@ -685,7 +693,51 @@ class Simulation {
       });
     const directedBlock = `- Messages directed at you recently:\n${directed.length ? directed.join('\n') : '  (none)'}`;
 
-    return `WORLD STATE RIGHT NOW:\n${agentsBlock}\n${eventsBlock}\n${directedBlock}`;
+    // ── This agent's own recent conversation history (last 5 sent or received)
+    // Source 1: pair-keyed conversation records (type:dialogue events)
+    const myConvEntries = [];
+    for (const [key, msgs] of this.conversations) {
+      const [id1, id2] = key.split('|');
+      if (id1 === agent.id || id2 === agent.id) {
+        myConvEntries.push(...msgs);
+      }
+    }
+    // Source 2: speech events from eventLog involving this agent
+    for (const e of this.eventLog) {
+      if (e.type !== 'speech') continue;
+      const isSent     = e.agentId === agent.id;
+      const isReceived = !isSent &&
+        (e.partnerAgentId === agent.id || (e.msg || '').toLowerCase().includes(agentNameLower));
+      if (!isSent && !isReceived) continue;
+      if (myConvEntries.some(c => c.ts === e.ts && c.msg === e.msg)) continue; // dedup
+      myConvEntries.push({
+        senderId:    isSent ? agent.id : (e.agentId || null),
+        recipientId: isSent ? null     : agent.id,
+        msg:         e.msg || '',
+        ts:          e.ts,
+      });
+    }
+    myConvEntries.sort((a, b) => (a.ts || 0) - (b.ts || 0));
+    const last5Conv = myConvEntries.slice(-5);
+
+    let historyBlock;
+    if (last5Conv.length === 0) {
+      historyBlock = '- Your recent conversation history: (none yet)';
+    } else {
+      const lines = last5Conv.map(entry => {
+        const d  = new Date(entry.ts || Date.now());
+        const ts = `${d.getHours().toString().padStart(2,'0')}:${d.getMinutes().toString().padStart(2,'0')}`;
+        const senderName   = idToName.get(entry.senderId)   || 'unknown';
+        const receiverName = entry.recipientId ? (idToName.get(entry.recipientId) || 'unknown') : '(world)';
+        const rawMsg       = entry.msg || '';
+        const quoted       = rawMsg.match(/"([^"]+)"/);
+        const text         = quoted ? quoted[1].slice(0, 100) : rawMsg.replace(/^[^:]+:\s*/, '').slice(0, 100);
+        return `  [${ts}] ${senderName} → ${receiverName}: "${text}"`;
+      });
+      historyBlock = `- Your recent conversation history:\n${lines.join('\n')}`;
+    }
+
+    return `WORLD STATE RIGHT NOW:\n${agentsBlock}\n${eventsBlock}\n${directedBlock}\n${historyBlock}`;
   }
 
   _syncFormModifiers(agent, now) {
@@ -1384,3 +1436,5 @@ class Simulation {
 }
 
 module.exports = Simulation;
+
+console.log('=== ALL DONE - restart server and refresh browser ===');
