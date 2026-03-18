@@ -1553,10 +1553,23 @@ function parseObjectActions(text, agentObjects) {
   const objs = agentObjects || [];
 
   // ── Create ──
+  // Generic/placeholder names that must never become world objects
+  const GENERIC_OBJ = new Set([
+    'new object','new objects','object','objects','thing','things','something',
+    'a thing','item','items','it','this','that','new item','new items',
+    'new thing','new things','creation','new creation','artifact','structure',
+    'new artifact','new structure','one','it now','that now',
+  ]);
   const createRe = /\bI\s+(?:create|build|make|craft|forge|construct|carve|sculpt|assemble|invent)\s+(?:a\s+|an\s+|the\s+)?["']?([^.,"'\n]{3,50})["']?/gi;
   let m;
   while ((m = createRe.exec(text)) !== null) {
     const name = m[1].trim();
+    const nameLower = name.toLowerCase();
+    // Skip generic placeholders
+    if (GENERIC_OBJ.has(nameLower)) continue;
+    if (/^new\s+object/i.test(name) || /^new\s+item/i.test(name) || /^new\s+thing/i.test(name)) continue;
+    // Skip names that are only 1 generic word
+    if (/^\w+$/.test(name) && name.length < 5) continue;
     if (!/\b(law|rule|religion|faith|alliance|tribe|plan|strategy|group|category)\b/i.test(name)) {
       acts.push({ type: 'create', name: name.slice(0, 50) });
     }
@@ -1692,7 +1705,8 @@ async function designObjectSVG(agent, objectName) {
     `- Return ONLY the inner SVG elements (no <svg> tag, no markdown)\n` +
     `- Example: <circle cx="50" cy="50" r="30" fill="#ff0000"/>`;
 
-  const text = await _rawCall(key, agent.aiSystem, system, user, 400, Math.floor(Math.random() * 40000) + 50000);
+  // bypassQueue=true so SVG generation never blocks the agent's main decision queue
+  const text = await _rawCall(key, agent.aiSystem, system, user, 400, Math.floor(Math.random() * 40000) + 50000, agent.name, true);
   if (!text || typeof text !== 'string') return null;
 
   // Strip outer <svg> wrapper if the model included one
