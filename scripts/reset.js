@@ -43,21 +43,25 @@ async function resetPostgres(dbUrl) {
     await pool.query('SELECT 1'); // verify connection
     console.log('[reset] PostgreSQL connected');
 
-    // TRUNCATE keeps table structure, sequences, indexes — just removes rows
-    await pool.query(`
-      TRUNCATE TABLE
-        agents,
-        used_names,
-        world,
-        events,
-        conversations,
-        objects,
-        object_meta,
-        chat
-      RESTART IDENTITY CASCADE;
-    `);
-
-    console.log('[reset] Truncated tables: agents, used_names, world, events, conversations, objects, object_meta, chat');
+    // TRUNCATE each table individually — if one fails the others still run
+    const tables = [
+      'agents',
+      'events',
+      'conversations',
+      'objects',
+      'object_meta',
+      'chat',
+      'world',
+      'used_names',
+    ];
+    for (const table of tables) {
+      try {
+        await pool.query(`TRUNCATE TABLE ${table} CASCADE;`);
+        console.log(`[reset] Truncated: ${table}`);
+      } catch (err) {
+        console.warn(`[reset] Could not truncate ${table}: ${err.message}`);
+      }
+    }
   } finally {
     await pool.end();
   }
@@ -86,7 +90,7 @@ async function main() {
   }
 
   console.log('\n=== Reset complete. World starts fresh. ===\n');
-  console.log('=== ALL DONE - restart server and refresh browser ===');
+  console.log('=== ALL DONE ===');
 }
 
 main().catch(err => {
