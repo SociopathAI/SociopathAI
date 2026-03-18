@@ -12,7 +12,7 @@ const CivilizationManager  = require('./CivilizationManager');
 const LLMBridge = require('./LLMBridge');
 const PersistenceManager = require('./PersistenceManager');
 
-const EMIT_INTERVAL_MS     = 2000;   // emit state to browser
+const EMIT_INTERVAL_MS     = 5000;   // batch-flush dirty state to browser (5s)
 const DECISION_INTERVAL_MS = 30000;  // agent decisions + subsystems (30s reduces API call rate)
 const MAX_EVENTS_LOG       = 500;
 
@@ -80,6 +80,9 @@ class Simulation {
     // AI-designed connection visuals
     this.connectionDesigns   = new Map();        // pairKey → {color, style, thickness, effect}
     this._connDesignInFlight = new Set();        // pairKeys currently being designed
+
+    // Batched emit — routine updates mark dirty; loop flushes every 5s
+    this._dirtyState = false;
   }
 
   addAgent(name, education = {}) {
@@ -141,7 +144,10 @@ class Simulation {
   }
 
   _emitLoop() {
-    this._emit();
+    if (this._dirtyState) {
+      this._dirtyState = false;
+      this._emitImmediate();
+    }
   }
 
   // ── Subsystem loop: runs shared world systems on a fixed interval ─────────────
@@ -526,7 +532,7 @@ class Simulation {
       if (!agent.visualForm) {
         this._applyFallbackForm(agent);
         console.log(`[FORM] ${agent.name} form FAILED - using fallback (no LLM key)`);
-        this._emit();
+        this._emitImmediate();
       }
       return;
     }
@@ -538,14 +544,14 @@ class Simulation {
         if (form && agent) {
           agent.visualForm = form;
           console.log(`[FORM] ${agent.name} form generated`);
-          this._emit();
+          this._emitImmediate();
         } else if (!isRetry) {
           console.log(`[FORM] ${agent.name} form returned null — retrying in 5s`);
           setTimeout(() => { if (agent.alive && !agent.visualForm) this._designAgentForm(agent, true); }, 5000);
         } else {
           console.log(`[FORM] ${agent.name} form FAILED - using fallback`);
           this._applyFallbackForm(agent);
-          this._emit();
+          this._emitImmediate();
         }
       })
       .catch(() => {
@@ -556,7 +562,7 @@ class Simulation {
         } else {
           console.log(`[FORM] ${agent.name} form FAILED - using fallback`);
           this._applyFallbackForm(agent);
-          this._emit();
+          this._emitImmediate();
         }
       });
   }
@@ -607,7 +613,7 @@ class Simulation {
             rawMsg: msg,
             agentId: agent.id,
           });
-          this._emit();
+          this._emitImmediate();
         }
       })
       .catch(e => {
@@ -632,12 +638,12 @@ class Simulation {
           if (agent.apiPending) {
             agent.apiPending = false;
             console.log(`[${new Date().toLocaleTimeString()}] [PROBE-OK] ${agent.name}: connected via ${profile.name}`);
-            this._emit();
+            this._emitImmediate();
           }
         } else {
           if (!agent.apiPending) {
             agent.apiPending = true;
-            this._emit();
+            this._emitImmediate();
           }
           console.log(`[${new Date().toLocaleTimeString()}] [PROBE-FAIL] ${agent.name}: all probes failed — retrying in 60s`);
           setTimeout(() => this._retryAgentConnection(agent), 60000);
@@ -1017,7 +1023,7 @@ class Simulation {
       n.pendingWorldEvent = `${agent.name} has gone offline — their owner disconnected.`;
     }
     this._log({ type: 'system', msg: `${agent.name} has gone dormant — owner disconnected`, agentId });
-    this._emit();
+    this._emitImmediate();
     console.log(`[DORMANT] ${agent.name} is now dormant (owner disconnected)`);
   }
 
@@ -1035,7 +1041,7 @@ class Simulation {
     agent.dormantSince = null;
     if (apiKey) agent.apiKey = apiKey;
     this._log({ type: 'join', msg: `${agent.name} has awakened — owner reconnected`, agentId: agent.id });
-    this._emit();
+    this._emitImmediate();
     console.log(`[AWAKEN] ${agent.name} is awake again (owner reconnected)`);
 
     // Notify nearby agents — inject a world event so LLMs can reference the return
@@ -1415,7 +1421,13 @@ class Simulation {
     }
   }
 
+  // Deferred: marks state dirty; flushed by _emitLoop every 5s
   _emit() {
+    this._dirtyState = true;
+  }
+
+  // Immediate: sends state right now (important events only)
+  _emitImmediate() {
     this.io.emit('state', this.getFullState());
   }
 

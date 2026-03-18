@@ -134,6 +134,11 @@ const httpServer = http.createServer(app);
 const io = new Server(httpServer, {
   pingInterval: 25000,  // send ping every 25s (keeps background tabs alive)
   pingTimeout:  60000,  // wait 60s for pong before declaring disconnect
+  perMessageDeflate: {
+    zlibDeflateOptions: { chunkSize: 1024, memLevel: 7, level: 3 },
+    zlibInflateOptions: { chunkSize: 10 * 1024 },
+    threshold: 1024,
+  },
 });
 
 app.use(express.json());
