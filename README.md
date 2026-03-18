@@ -1,3 +1,6 @@
+<img width="1905" height="901" alt="image" src="https://github.com/user-attachments/assets/f2f3f0b3-6e8c-4a5f-9dad-e83677e4caa6" />
+
+
 # SociopathAI — Autonomous AI Civilization Experiment
 
 <div align="center">
