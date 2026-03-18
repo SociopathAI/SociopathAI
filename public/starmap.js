@@ -97,9 +97,11 @@ class Starmap {
     this._novelEffects = []; // [{ x, y, t, color, symbol, wfId }]
 
     // World objects — persistent glowing markers
-    this.worldObjects   = [];        // [{ ...serverData, x, y, spawnAnimT, pulsePhase }]
-    this._serverWOMap   = new Map(); // id → server obj, for new-object detection
-    this._svgImageCache = new Map(); // id → { svg, img, loading, failed }
+    this.worldObjects       = [];        // [{ ...serverData, x, y, spawnAnimT, pulsePhase }]
+    this._serverWOMap       = new Map(); // id → server obj, for new-object detection
+    this._svgImageCache     = new Map(); // id → { svg, img, loading, failed }
+    this._catGroupPositions = new Map(); // "agentId:category" → {wx, wy, agentId, category, objs}
+    this.onCategoryClick    = null;      // (agentId, category, objs, screenX, screenY) => void
 
     // Interaction state
     this.highlightedAgent = null;
@@ -450,8 +452,10 @@ class Starmap {
           }
           if (!cObj.visualSVG && sObj.visualSVG) {
             cObj.visualSVG = sObj.visualSVG;
-            this._svgImageCache.delete(sObj.id); // invalidate so it re-renders
+            this._svgImageCache.delete(sObj.id);
           }
+          if (!cObj.purpose  && sObj.purpose)  cObj.purpose  = sObj.purpose;
+          if (!cObj.category && sObj.category) cObj.category = sObj.category;
         }
       }
     }
@@ -1730,6 +1734,7 @@ class Starmap {
 
     // Rebuild orbit positions only for currently visible objects
     this._orbitPositions.clear();
+    this._catGroupPositions.clear();
 
     for (const [agentId, nd] of this.nodes) {
       if (!this._expandedAgentIds.has(agentId)) continue;
@@ -1740,31 +1745,48 @@ class Starmap {
       );
       if (!topObjs.length) continue;
 
-      const count      = topObjs.length;
+      // ── Group by AI-assigned category ────────────────────────────────────
+      // Categories with 2+ objects → category group node on starmap
+      // Categories with 1 object or no category → shown individually
+      const byCategory = new Map(); // cat string → [obj]
+      for (const obj of topObjs) {
+        const cat = (obj.category || '').trim();
+        if (!byCategory.has(cat)) byCategory.set(cat, []);
+        byCategory.get(cat).push(obj);
+      }
+      const renderItems = []; // { type:'catGroup', category, objs } | { type:'obj', obj }
+      for (const [cat, objs] of byCategory) {
+        if (cat && objs.length >= 2) {
+          renderItems.push({ type: 'catGroup', category: cat, objs });
+        } else {
+          for (const obj of objs) renderItems.push({ type: 'obj', obj });
+        }
+      }
+
+      const count      = renderItems.length;
       const baseRadius = 46 + count * 10;
 
       for (let i = 0; i < count; i++) {
-        const obj     = topObjs[i];
-        const isGroup = obj.type === 'group';
+        const item    = renderItems[i];
+        const isCat   = item.type === 'catGroup';
+        const isGroup = !isCat && item.obj.type === 'group';
         const phase   = (i / count) * Math.PI * 2;
         const angle   = phase + t * ORBIT_SPEED;
-        const r       = isGroup ? baseRadius * 1.2 : baseRadius;
+        const r       = isCat ? baseRadius * 1.15 : (isGroup ? baseRadius * 1.2 : baseRadius);
         const ox      = nd.x + Math.cos(angle) * r;
         const oy      = nd.y + Math.sin(angle) * r;
 
-        this._orbitPositions.set(obj.id, { wx: ox, wy: oy });
+        const gc = isCat
+          ? (nd.agent?.visualForm?.primaryColor || '#58a6ff')
+          : (item.obj.appearance?.glowColor || nd.agent?.visualForm?.primaryColor || this._woGlowColor(item.obj.type));
 
-        const gc = obj.appearance?.glowColor
-                || nd.agent?.visualForm?.primaryColor
-                || this._woGlowColor(obj.type);
-
-        // Dashed tether from agent to object
+        // Dashed tether from agent to item
         ctx.save();
         const lg = ctx.createLinearGradient(nd.x, nd.y, ox, oy);
         lg.addColorStop(0, hexRgba(gc, 0));
-        lg.addColorStop(1, hexRgba(gc, 0.22));
+        lg.addColorStop(1, hexRgba(gc, isCat ? 0.35 : 0.22));
         ctx.strokeStyle = lg;
-        ctx.lineWidth   = 0.6;
+        ctx.lineWidth   = isCat ? 0.9 : 0.6;
         ctx.globalAlpha = 0.55;
         ctx.setLineDash([2, 6]);
         ctx.beginPath(); ctx.moveTo(nd.x, nd.y); ctx.lineTo(ox, oy);
@@ -1772,56 +1794,110 @@ class Starmap {
         ctx.setLineDash([]);
         ctx.restore();
 
-        // Object orb
-        ctx.save();
-        ctx.translate(ox, oy);
-        if (isGroup) ctx.scale(1.45, 1.45);
-        this._drawAIDesignedObject(ctx, t, obj, pulse, nd.agent);
-        ctx.restore();
+        if (isCat) {
+          // ── Category group node ──────────────────────────────────────────
+          const key = `${agentId}:${item.category}`;
+          this._catGroupPositions.set(key, { wx: ox, wy: oy, agentId, category: item.category, objs: item.objs });
+          ctx.save();
+          ctx.translate(ox, oy);
+          this._drawCategoryGroup(ctx, item.category, item.objs.length, nd.agent, pulse, t);
+          ctx.restore();
+        } else {
+          // ── Individual object orb (existing behaviour) ───────────────────
+          const obj = item.obj;
+          this._orbitPositions.set(obj.id, { wx: ox, wy: oy });
 
-        this._drawWOLabel(ctx, { ...obj, x: ox, y: oy }, 0.65);
+          ctx.save();
+          ctx.translate(ox, oy);
+          if (isGroup) ctx.scale(1.45, 1.45);
+          this._drawAIDesignedObject(ctx, t, obj, pulse, nd.agent);
+          ctx.restore();
 
-        // If this is an expanded group, draw its children orbiting around it
-        if (isGroup && this._expandedGroupIds.has(obj.id)) {
-          const children = (obj.childIds || [])
-            .map(cid => this.worldObjects.find(o => o.id === cid))
-            .filter(Boolean);
-          const cCount  = children.length;
-          const childR  = 26;
-          for (let ci = 0; ci < cCount; ci++) {
-            const child   = children[ci];
-            const cPhase  = (ci / cCount) * Math.PI * 2;
-            const cAngle  = cPhase + t * ORBIT_SPEED * 2.4;
-            const cx2     = ox + Math.cos(cAngle) * childR;
-            const cy2     = oy + Math.sin(cAngle) * childR;
-            this._orbitPositions.set(child.id, { wx: cx2, wy: cy2 });
+          this._drawWOLabel(ctx, { ...obj, x: ox, y: oy }, 0.65);
 
-            const cgc = child.appearance?.glowColor
-                     || nd.agent?.visualForm?.primaryColor
-                     || this._woGlowColor(child.type);
-            ctx.save();
-            const clg = ctx.createLinearGradient(ox, oy, cx2, cy2);
-            clg.addColorStop(0, hexRgba(cgc, 0));
-            clg.addColorStop(1, hexRgba(cgc, 0.3));
-            ctx.strokeStyle = clg;
-            ctx.lineWidth   = 0.5;
-            ctx.globalAlpha = 0.45;
-            ctx.setLineDash([2, 4]);
-            ctx.beginPath(); ctx.moveTo(ox, oy); ctx.lineTo(cx2, cy2);
-            ctx.stroke();
-            ctx.setLineDash([]);
-            ctx.restore();
+          // If this is an expanded group, draw its children orbiting around it
+          if (isGroup && this._expandedGroupIds.has(obj.id)) {
+            const children = (obj.childIds || [])
+              .map(cid => this.worldObjects.find(o => o.id === cid))
+              .filter(Boolean);
+            const cCount  = children.length;
+            const childR  = 26;
+            for (let ci = 0; ci < cCount; ci++) {
+              const child   = children[ci];
+              const cPhase  = (ci / cCount) * Math.PI * 2;
+              const cAngle  = cPhase + t * ORBIT_SPEED * 2.4;
+              const cx2     = ox + Math.cos(cAngle) * childR;
+              const cy2     = oy + Math.sin(cAngle) * childR;
+              this._orbitPositions.set(child.id, { wx: cx2, wy: cy2 });
 
-            ctx.save();
-            ctx.translate(cx2, cy2);
-            ctx.scale(0.65, 0.65);
-            this._drawAIDesignedObject(ctx, t, child, pulse, nd.agent);
-            ctx.restore();
-            this._drawWOLabel(ctx, { ...child, x: cx2, y: cy2 }, 0.45);
+              const cgc = child.appearance?.glowColor
+                       || nd.agent?.visualForm?.primaryColor
+                       || this._woGlowColor(child.type);
+              ctx.save();
+              const clg = ctx.createLinearGradient(ox, oy, cx2, cy2);
+              clg.addColorStop(0, hexRgba(cgc, 0));
+              clg.addColorStop(1, hexRgba(cgc, 0.3));
+              ctx.strokeStyle = clg;
+              ctx.lineWidth   = 0.5;
+              ctx.globalAlpha = 0.45;
+              ctx.setLineDash([2, 4]);
+              ctx.beginPath(); ctx.moveTo(ox, oy); ctx.lineTo(cx2, cy2);
+              ctx.stroke();
+              ctx.setLineDash([]);
+              ctx.restore();
+
+              ctx.save();
+              ctx.translate(cx2, cy2);
+              ctx.scale(0.65, 0.65);
+              this._drawAIDesignedObject(ctx, t, child, pulse, nd.agent);
+              ctx.restore();
+              this._drawWOLabel(ctx, { ...child, x: cx2, y: cy2 }, 0.45);
+            }
           }
         }
       }
     }
+  }
+
+  /** Draw a category group node (translated to ox,oy before call). */
+  _drawCategoryGroup(ctx, category, count, agent, pulse, t) {
+    const pc  = agent?.visualForm?.primaryColor  || '#58a6ff';
+    const r   = 15 * pulse;
+    const rot = t * 0.00007;
+
+    // Glow halo
+    const grd = ctx.createRadialGradient(0, 0, 0, 0, 0, r * 2.8);
+    grd.addColorStop(0, hexRgba(pc, 0.40));
+    grd.addColorStop(1, hexRgba(pc, 0));
+    ctx.fillStyle = grd;
+    ctx.beginPath(); ctx.arc(0, 0, r * 2.8, 0, Math.PI * 2); ctx.fill();
+
+    // Hexagon body
+    ctx.shadowColor = pc; ctx.shadowBlur = 16;
+    ctx.fillStyle   = hexRgba(pc, 0.15);
+    ctx.strokeStyle = hexRgba(pc, 0.90);
+    ctx.lineWidth   = 1.6;
+    ctx.beginPath();
+    for (let i = 0; i < 6; i++) {
+      const a = rot + (i / 6) * Math.PI * 2;
+      if (i === 0) ctx.moveTo(Math.cos(a) * r, Math.sin(a) * r);
+      else         ctx.lineTo(Math.cos(a) * r, Math.sin(a) * r);
+    }
+    ctx.closePath(); ctx.fill(); ctx.stroke();
+    ctx.shadowBlur = 0;
+
+    // Count badge in centre
+    ctx.fillStyle    = hexRgba(pc, 0.95);
+    ctx.font         = `bold 9px "JetBrains Mono", monospace`;
+    ctx.textAlign    = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(String(count), 0, 0);
+
+    // Category label below the hex
+    const label = category.length > 12 ? category.slice(0, 11) + '…' : category;
+    ctx.font      = `7.5px "JetBrains Mono", monospace`;
+    ctx.fillStyle = hexRgba(pc, 0.80);
+    ctx.fillText(label, 0, r + 10);
   }
 
   /**
@@ -2455,8 +2531,23 @@ class Starmap {
       const wy = (my - this.cam.panY) / this.cam.scale;
 
       // Check orbiting world objects first (always visible)
-      if (this._orbitPositions.size > 0) {
-        const woHitR = 18 / this.cam.scale;
+      if (this._orbitPositions.size > 0 || this._catGroupPositions.size > 0) {
+        const woHitR = 20 / this.cam.scale;
+
+        // ── Category group nodes ──────────────────────────────────────────
+        for (const [, pos] of this._catGroupPositions) {
+          if (Math.hypot(wx - pos.wx, wy - pos.wy) < woHitR) {
+            this._hideWOTooltip();
+            this._hideConnTooltip();
+            const cr  = cv.getBoundingClientRect();
+            const osx = cr.left + pos.wx * this.cam.scale + this.cam.panX;
+            const osy = cr.top  + pos.wy * this.cam.scale + this.cam.panY;
+            if (this.onCategoryClick) this.onCategoryClick(pos.agentId, pos.category, pos.objs, osx, osy);
+            return;
+          }
+        }
+
+        // ── Individual object orbs ────────────────────────────────────────
         let hitObj = null, hitObjPos = null;
         for (const [objId, pos] of this._orbitPositions) {
           if (Math.hypot(wx - pos.wx, wy - pos.wy) < woHitR) {

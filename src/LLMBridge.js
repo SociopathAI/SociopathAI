@@ -1553,25 +1553,14 @@ function parseObjectActions(text, agentObjects) {
   const objs = agentObjects || [];
 
   // ── Create ──
-  // Generic/placeholder names that must never become world objects
-  const GENERIC_OBJ = new Set([
-    'new object','new objects','object','objects','thing','things','something',
-    'a thing','item','items','it','this','that','new item','new items',
-    'new thing','new things','creation','new creation','artifact','structure',
-    'new artifact','new structure','one','it now','that now',
-  ]);
-  const createRe = /\bI\s+(?:create|build|make|craft|forge|construct|carve|sculpt|assemble|invent)\s+(?:a\s+|an\s+|the\s+)?["']?([^.,"'\n]{3,50})["']?/gi;
+  // Only skip names that belong to other systems (laws, religion, etc.) — AI names objects freely
+  const createRe = /\bI\s+(?:create|build|make|craft|forge|construct|carve|sculpt|assemble|invent)\s+(?:a\s+|an\s+|the\s+)?["']?([^.,"'\n]{2,60})["']?/gi;
   let m;
   while ((m = createRe.exec(text)) !== null) {
     const name = m[1].trim();
-    const nameLower = name.toLowerCase();
-    // Skip generic placeholders
-    if (GENERIC_OBJ.has(nameLower)) continue;
-    if (/^new\s+object/i.test(name) || /^new\s+item/i.test(name) || /^new\s+thing/i.test(name)) continue;
-    // Skip names that are only 1 generic word
-    if (/^\w+$/.test(name) && name.length < 5) continue;
+    if (!name) continue;
     if (!/\b(law|rule|religion|faith|alliance|tribe|plan|strategy|group|category)\b/i.test(name)) {
-      acts.push({ type: 'create', name: name.slice(0, 50) });
+      acts.push({ type: 'create', name: name.slice(0, 60) });
     }
   }
 
@@ -1688,6 +1677,33 @@ async function resolveProvider(apiKey, aiSystem, agentName) {
 }
 
 /**
+ * Ask the agent to self-categorize a newly created object.
+ * Returns { purpose, category } or null. Bypasses queue — never blocks decisions.
+ */
+async function categorizeWorldObject(agent, objectName) {
+  const key = getKey(agent);
+  if (!key) return null;
+
+  const system = `You are ${agent.name}. Answer in JSON only. No extra text.`;
+  const user =
+    `You just created "${objectName}".\n` +
+    `Answer these two questions as JSON:\n` +
+    `{\n` +
+    `  "purpose": "why did you create this? one sentence",\n` +
+    `  "category": "what category is this? one or two words, you decide"\n` +
+    `}`;
+
+  const text = await _rawCall(key, agent.aiSystem, system, user, 120, Math.floor(Math.random() * 40000) + 50000, agent.name, true);
+  if (!text) return null;
+  const obj = _extractJSON(text);
+  if (!obj) return null;
+
+  const purpose  = typeof obj.purpose  === 'string' ? obj.purpose.slice(0, 300)  : null;
+  const category = typeof obj.category === 'string' ? obj.category.slice(0, 100) : null;
+  return (purpose || category) ? { purpose, category } : null;
+}
+
+/**
  * Ask the agent to express a world object as SVG inner elements.
  * Returns sanitized SVG string (no <svg> wrapper), or null on failure.
  */
@@ -1725,6 +1741,6 @@ async function designObjectSVG(agent, objectName) {
   return svg || null;
 }
 
-module.exports = { decideAction, conductDialogue, deliverMessage, respondToMessage, summarizeMemory, designVisualForm, designConnection, designWorldObject, designObjectSVG, parseObjectActions, extractBehaviorVerb, designNovelEffect, sanitizeForDisplay, setGlobalKey, getKey, getSpawnStatus, resolveProvider, detectKeyProvider, clearProbeCache };
+module.exports = { decideAction, conductDialogue, deliverMessage, respondToMessage, summarizeMemory, designVisualForm, designConnection, designWorldObject, designObjectSVG, categorizeWorldObject, parseObjectActions, extractBehaviorVerb, designNovelEffect, sanitizeForDisplay, setGlobalKey, getKey, getSpawnStatus, resolveProvider, detectKeyProvider, clearProbeCache };
 
 console.log('=== AUTO-MODEL DETECTION ACTIVE ===');

@@ -1406,6 +1406,9 @@ class Simulation {
       spawnTs:     Date.now(),
       expiryTs,
       appearance:  null,  // filled asynchronously by LLM
+      visualSVG:   null,  // filled asynchronously by LLM
+      purpose:     null,  // AI self-description of why it was created
+      category:    null,  // AI-assigned category (free-form, no restrictions)
       position:    null,  // reserved for future spatial placement
     };
     this.worldObjects.push(obj);
@@ -1424,6 +1427,14 @@ class Simulation {
       LLMBridge.designObjectSVG(creatorAgent, name).then(svg => {
         if (svg && obj) {
           obj.visualSVG = svg;
+          PersistenceManager.saveObjects(this);
+        }
+      }).catch(() => {});
+
+      LLMBridge.categorizeWorldObject(creatorAgent, name).then(meta => {
+        if (meta && obj) {
+          if (meta.purpose)  obj.purpose  = meta.purpose;
+          if (meta.category) obj.category = meta.category;
           PersistenceManager.saveObjects(this);
         }
       }).catch(() => {});

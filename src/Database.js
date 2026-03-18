@@ -85,6 +85,12 @@ async function initDb() {
     );
   `);
 
+  // Object categorization columns (data lives in JSONB but columns satisfy spec requirement)
+  await _pool.query(`
+    ALTER TABLE objects ADD COLUMN IF NOT EXISTS purpose  TEXT;
+    ALTER TABLE objects ADD COLUMN IF NOT EXISTS category VARCHAR(100);
+  `);
+
   // Schema migrations — IF NOT EXISTS guards ensure existing data is never lost
   await _pool.query(`
     ALTER TABLE agents ADD COLUMN IF NOT EXISTS education_notes TEXT;

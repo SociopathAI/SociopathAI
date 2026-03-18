@@ -2787,6 +2787,91 @@ document.addEventListener('click', function(e) {
   e.stopPropagation();
 }, true);
 
+// ─── CATEGORY PANEL ────────────────────────────────────────────────────────────
+(function () {
+  const panel = document.createElement('div');
+  panel.id = 'cat-panel';
+  panel.style.cssText = [
+    'position:fixed', 'z-index:9400', 'display:none',
+    'background:rgba(4,10,24,0.97)', 'border:1px solid rgba(80,130,200,0.45)',
+    'border-radius:12px', 'padding:14px 16px', 'min-width:240px', 'max-width:320px', 'max-height:70vh',
+    'overflow-y:auto', 'box-shadow:0 0 32px rgba(80,130,255,0.22)',
+    'font-family:"JetBrains Mono",monospace', 'color:#c8d8f0',
+  ].join(';');
+  document.body.appendChild(panel);
+
+  function closeCatPanel() {
+    panel.style.display = 'none';
+  }
+  window.closeCatPanel = closeCatPanel;
+
+  document.addEventListener('mousedown', e => {
+    if (panel.style.display !== 'none' && !panel.contains(e.target)) closeCatPanel();
+  });
+  document.addEventListener('keydown', e => { if (e.key === 'Escape') closeCatPanel(); });
+
+  window.showCategoryPanel = function (agentId, category, objs, sx, sy) {
+    const agent = (lastState?.agents || []).find(a => a.id === agentId);
+    const color = agent ? _agentColor(agent) : '#58a6ff';
+
+    let html = `
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px">
+        <div style="font-size:11px;font-weight:700;color:${esc(color)};letter-spacing:0.06em">${esc(category)}</div>
+        <span style="font-size:9px;color:#4a6080;background:rgba(80,130,200,0.12);padding:2px 7px;border-radius:8px">${objs.length} objects</span>
+      </div>`;
+
+    for (const obj of objs) {
+      const svgPart = obj.visualSVG
+        ? `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" width="36" height="36" style="flex-shrink:0;border-radius:4px;overflow:hidden">${obj.visualSVG}</svg>`
+        : `<div style="width:36px;height:36px;border-radius:50%;background:${esc(color)};opacity:0.25;flex-shrink:0"></div>`;
+      const purpose = esc((obj.purpose || obj.desc || '').slice(0, 100));
+
+      html += `
+        <div class="cat-obj-row" data-obj-id="${esc(obj.id)}" style="
+          display:flex;gap:10px;align-items:flex-start;padding:8px 6px;border-radius:8px;
+          cursor:pointer;border-bottom:1px solid rgba(80,130,200,0.10);margin-bottom:2px">
+          ${svgPart}
+          <div style="min-width:0">
+            <div style="font-size:10px;font-weight:700;color:${esc(color)};white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(obj.name)}</div>
+            ${purpose ? `<div style="font-size:8.5px;color:#7090b0;margin-top:2px;line-height:1.4">${purpose}</div>` : ''}
+          </div>
+        </div>`;
+    }
+
+    html += `<button onclick="window.closeCatPanel()" style="
+      margin-top:8px;width:100%;background:none;border:1px solid rgba(80,130,200,0.25);
+      border-radius:6px;padding:4px;color:#4a6080;cursor:pointer;font-size:9px;font-family:inherit">CLOSE</button>`;
+
+    panel.innerHTML = html;
+
+    // Position near the click point, keeping inside viewport
+    const W = window.innerWidth, H = window.innerHeight;
+    let left = (sx || W / 2) + 12;
+    let top  = (sy || H / 2) - 60;
+    panel.style.display = 'block';
+    requestAnimationFrame(() => {
+      const pw = panel.offsetWidth || 280, ph = panel.offsetHeight || 300;
+      if (left + pw > W - 12) left = (sx || W / 2) - pw - 12;
+      if (top  + ph > H - 12) top  = H - ph - 12;
+      if (top  < 12)          top  = 12;
+      if (left < 12)          left = 12;
+      panel.style.left = left + 'px';
+      panel.style.top  = top  + 'px';
+    });
+
+    // Individual object click → show full detail
+    panel.querySelectorAll('.cat-obj-row').forEach(el => {
+      el.addEventListener('mouseover', () => { el.style.background = 'rgba(80,130,200,0.10)'; });
+      el.addEventListener('mouseout',  () => { el.style.background = ''; });
+      el.addEventListener('click', e => {
+        e.stopPropagation();
+        const obj = objs.find(o => o.id === el.dataset.objId);
+        if (obj) { closeCatPanel(); showWorldObjectInfo(obj, sx, sy, null, null); }
+      });
+    });
+  };
+})();
+
 // ─── WORLD OBJECT INFO POPUP ───
 (function () {
   // Create the popup element once
@@ -2943,6 +3028,9 @@ document.addEventListener('click', function(e) {
 
   // Clicking a world object on the starmap → show info popup
   starmapInstance.onObjectClick = (obj, sx, sy, agSx, agSy) => { showWorldObjectInfo(obj, sx, sy, agSx, agSy); };
+
+  // Clicking a category group node → show category panel
+  starmapInstance.onCategoryClick = (agentId, category, objs, sx, sy) => { showCategoryPanel(agentId, category, objs, sx, sy); };
 
   // Live-track popup position as camera pans/zooms
   starmapInstance.onObjectPositionUpdate = (sx, sy) => {
