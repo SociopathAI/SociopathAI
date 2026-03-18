@@ -299,15 +299,26 @@ class Simulation {
     // ── Speech: log it and queue for nearby agents ──
     const speechLine = decision.speech || decision.dialogue || null;
     if (speechLine) {
-      const displaySpeech  = LLMBridge.sanitizeForDisplay(speechLine);
-      const speechLower    = speechLine.toLowerCase();
-      // Detect if this message is directed at a specific other agent by name
-      const namedTarget    = this.agents.find(a =>
-        a.alive && a.id !== agent.id &&
+      const displaySpeech = LLMBridge.sanitizeForDisplay(speechLine);
+      const speechLower   = speechLine.toLowerCase();
+
+      // Check if any OFFLINE agent is named — ignore those messages entirely
+      const offlineNamed = this.agents.filter(a =>
+        a.alive && a.dormant && a.id !== agent.id &&
         speechLower.includes(a.name.toLowerCase())
       );
+      for (const off of offlineNamed) {
+        console.log(`[SYSTEM] ${off.name} is offline - message ignored`);
+      }
+
+      // Detect if this message is directed at a specific ONLINE agent by name
+      const namedTarget = this.agents.find(a =>
+        a.alive && !a.dormant && a.id !== agent.id &&
+        speechLower.includes(a.name.toLowerCase())
+      );
+
       if (namedTarget) {
-        // Directed message — log as 'dialogue' so connection lines and history work correctly
+        // Directed message to online agent — log as 'dialogue'
         this._log({
           type:           'dialogue',
           msg:            `${agent.name} [${agent.aiSystem}]: "${displaySpeech}"`,
@@ -315,8 +326,8 @@ class Simulation {
           agentId:        agent.id,
           partnerAgentId: namedTarget.id,
         });
-      } else {
-        // Broadcast / undirected speech
+      } else if (offlineNamed.length === 0) {
+        // Pure monologue — no online or offline agent named
         this._log({
           type:    'speech',
           msg:     `${agent.name} [${agent.aiSystem}]: "${displaySpeech}"`,
@@ -324,8 +335,13 @@ class Simulation {
           agentId: agent.id,
         });
       }
+      // If only offline agents were named: message is ignored — no log, no routing
+
       agent.statusMessage = displaySpeech.slice(0, 160);
-      this._routeSpeech(agent, speechLine);
+      // Route only if message wasn't exclusively directed at offline agents
+      if (namedTarget || offlineNamed.length === 0) {
+        this._routeSpeech(agent, speechLine);
+      }
     }
 
     if (decision.invents) {
@@ -683,7 +699,7 @@ class Simulation {
     // ── Other agents present ────────────────────────────────────────────────
     let agentsBlock;
     if (!online.length) {
-      agentsBlock = '- Other agents present: none (you are alone)';
+      agentsBlock = 'You are alone in this world right now.';
     } else {
       const agentLines = online.slice(0, 6).map(a => {
         const lastMsg = (this.world.messages || []).filter(m => m.agentId === a.id).slice(-1)[0];
@@ -742,7 +758,16 @@ class Simulation {
       });
     }
     myConvEntries.sort((a, b) => (a.ts || 0) - (b.ts || 0));
-    const last5Conv = myConvEntries.slice(-5);
+    // Only show history involving currently online agents — offline agents invisible
+    const last5Conv = myConvEntries
+      .filter(entry => {
+        const sid = entry.senderId;
+        const rid = entry.recipientId;
+        const senderOk    = !sid || sid === agent.id || onlineIds.has(sid);
+        const recipientOk = !rid || rid === agent.id || onlineIds.has(rid);
+        return senderOk && recipientOk;
+      })
+      .slice(-5);
 
     let historyBlock;
     if (last5Conv.length === 0) {
@@ -825,18 +850,9 @@ class Simulation {
       return;
     }
 
-    // Named addressing
-    const allAlive = this.agents.filter(a => a.alive && a.id !== sender.id);
-    const named    = allAlive.filter(a => lower.includes(a.name.toLowerCase()));
-    if (named.length) {
-      const namedOnline  = named.filter(a => !a.dormant);
-      const namedOffline = named.filter(a =>  a.dormant);
-      for (const off of namedOffline) {
-        this._log({ type: 'system', msg: `${off.name} is offline — message will reach them when they return.` });
-        // Still queue for offline agents so they see it when they wake
-        if (!off.incomingMessages) off.incomingMessages = [];
-        off.incomingMessages.push({ from: sender.name, text: speechText, ts: Date.now() });
-      }
+    // Named addressing — online agents only; offline agents are already ignored upstream
+    const namedOnline = online.filter(a => lower.includes(a.name.toLowerCase()));
+    if (namedOnline.length) {
       for (const recipient of namedOnline.slice(0, 3)) queueMsg(recipient);
       return;
     }
