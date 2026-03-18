@@ -75,7 +75,8 @@
       "Bash(find:*)",
       "Bash(ls:*)",
       "Bash(echo:*)",
-      "Bash(which railway:*)"
+      "Bash(which railway:*)",
+      "Bash(xargs wc:*)"
     ]
   }
 }
