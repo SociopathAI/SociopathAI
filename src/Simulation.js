@@ -326,8 +326,8 @@ class Simulation {
           agentId:        agent.id,
           partnerAgentId: namedTarget.id,
         });
-      } else if (offlineNamed.length === 0) {
-        // Pure monologue — no online or offline agent named
+      } else {
+        // Monologue — no online agent named (includes offline-only mentions which are ignored)
         this._log({
           type:    'speech',
           msg:     `${agent.name} [${agent.aiSystem}]: "${displaySpeech}"`,
@@ -335,7 +335,6 @@ class Simulation {
           agentId: agent.id,
         });
       }
-      // If only offline agents were named: message is ignored — no log, no routing
 
       agent.statusMessage = displaySpeech.slice(0, 160);
       // Route only if message wasn't exclusively directed at offline agents

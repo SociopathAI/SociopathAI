@@ -2086,7 +2086,6 @@ function renderConversations(allEvents) {
     agentById[a.id]       = a;
   }
 
-  const broadcasts = [];
   const threads    = new Map(); // pairKey (name-based) → { pairKey, partners[], messages[] }
 
   // ── Full conversation history from server (not limited to last 40 events) ──
@@ -2124,14 +2123,6 @@ function renderConversations(allEvents) {
     }
   }
 
-  // Broadcasts from event log (speech events — not in conversations store)
-  for (const e of (allEvents || [])) {
-    if (e.type === 'speech') {
-      const m = e.msg.match(/^(.+?)\s*\[.+?\]:\s*"([\s\S]+)"$/);
-      if (m) broadcasts.push({ from: m[1].trim(), text: m[2].trim(), ts: e.ts });
-    }
-  }
-
   // Sort messages within each thread chronologically
   for (const t of threads.values()) t.messages.sort((a, b) => a.ts - b.ts);
 
@@ -2142,14 +2133,12 @@ function renderConversations(allEvents) {
     focusName = fa ? fa.name : null;
   }
 
-  let displayThreads    = threads;
-  let displayBroadcasts = broadcasts;
-  let headerLabel       = null;
+  let displayThreads = threads;
+  let headerLabel    = null;
 
   if (focusName) {
-    displayThreads    = new Map([...threads].filter(([, t]) => t.partners.includes(focusName)));
-    displayBroadcasts = broadcasts.filter(b => b.from === focusName);
-    headerLabel       = `${focusName}'s Conversations`;
+    displayThreads = new Map([...threads].filter(([, t]) => t.partners.includes(focusName)));
+    headerLabel    = `${focusName}'s Conversations`;
     console.log(`[Chats] Agent "${focusName}" — ${displayThreads.size} conversation(s) found (total threads: ${threads.size}, server convos: ${serverConvos?.length ?? 'none'})`);
   }
 
@@ -2165,12 +2154,12 @@ function renderConversations(allEvents) {
     console.log('[Chats] Opening thread:', _convoOpenThread, '→', thread ? `${thread.partners.join(' ↔ ')} (${thread.messages.length} msgs)` : 'NOT FOUND');
     _renderConvoThread(thread, myNames, agentSystems, agentColorMap, focusName);
   } else {
-    _renderConvoList(displayThreads, displayBroadcasts, myNames, agentSystems, agentColorMap, headerLabel, focusName);
+    _renderConvoList(displayThreads, myNames, agentSystems, agentColorMap, headerLabel, focusName);
   }
 }
 
-function _renderConvoList(threads, broadcasts, myNames, agentSystems, agentColorMap, headerLabel, focusName) {
-  if (threads.size === 0 && broadcasts.length === 0) {
+function _renderConvoList(threads, myNames, agentSystems, agentColorMap, headerLabel, focusName) {
+  if (threads.size === 0) {
     const emptyNote = headerLabel
       ? `<div class="convo-context-header">${esc(headerLabel)}</div><div class="convo-empty">No conversations involving this agent yet.</div>`
       : '<div class="convo-empty">No conversations yet — agents will talk as the simulation runs.</div>';
@@ -2256,23 +2245,6 @@ function _renderConvoList(threads, broadcasts, myNames, agentSystems, agentColor
             </div>
           </div>`;
       }
-    }
-  }
-
-  // ── Broadcasts ──
-  if (broadcasts.length > 0) {
-    const recent = broadcasts.slice().reverse().slice(0, 8);
-    html += '<div class="convo-section-label convo-section-broadcast">Broadcasts</div>';
-    for (const b of recent) {
-      const bColor = agentColorMap[b.from] || 'var(--orange)';
-      html += `
-        <div class="convo-broadcast-row">
-          <div class="convo-broadcast-header">
-            <span class="convo-broadcast-from" style="color:${esc(bColor)}">${esc(b.from)}</span>
-            <span class="convo-broadcast-time">${fmtTime(b.ts)}</span>
-          </div>
-          <div class="convo-broadcast-text">${esc(b.text)}</div>
-        </div>`;
     }
   }
 
