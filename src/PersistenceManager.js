@@ -202,6 +202,7 @@ function _jsonSaveObjects(sim) {
       spawnTs:     o.spawnTs,
       expiryTs:    o.expiryTs    || null,
       appearance:  o.appearance  || null,
+      visualSVG:   o.visualSVG   || null,
       position:    o.position    || null,
     });
   }
@@ -391,6 +392,7 @@ async function _pgSaveObjects(sim) {
       spawnTs:     o.spawnTs,
       expiryTs:    o.expiryTs    || null,
       appearance:  o.appearance  || null,
+      visualSVG:   o.visualSVG   || null,
       position:    o.position    || null,
     };
     await pool.query(

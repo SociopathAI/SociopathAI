@@ -1295,6 +1295,9 @@ class Simulation {
           LLMBridge.designWorldObject(agent, action.name, 'group').then(ap => {
             if (ap && groupObj) { groupObj.appearance = ap; PersistenceManager.saveObjects(this); }
           }).catch(() => {});
+          LLMBridge.designObjectSVG(agent, action.name).then(svg => {
+            if (svg && groupObj) { groupObj.visualSVG = svg; PersistenceManager.saveObjects(this); }
+          }).catch(() => {});
         }
         this._log({ type: 'object_group', msg: `${agent.name} organized objects into group "${action.name}"`, agentId: agent.id });
 
@@ -1409,12 +1412,18 @@ class Simulation {
     // Persist immediately — world objects live forever
     PersistenceManager.saveObjects(this);
 
-    // Fire async LLM to design the object's visual appearance
+    // Fire async LLM calls to design the object's appearance and SVG visualization
     if (creatorAgent && LLMBridge.getKey(creatorAgent)) {
       LLMBridge.designWorldObject(creatorAgent, name, type).then(appearance => {
         if (appearance && obj) {
           obj.appearance = appearance;
-          // Save again now that appearance is filled in
+          PersistenceManager.saveObjects(this);
+        }
+      }).catch(() => {});
+
+      LLMBridge.designObjectSVG(creatorAgent, name).then(svg => {
+        if (svg && obj) {
+          obj.visualSVG = svg;
           PersistenceManager.saveObjects(this);
         }
       }).catch(() => {});

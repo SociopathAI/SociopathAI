@@ -1674,6 +1674,43 @@ async function resolveProvider(apiKey, aiSystem, agentName) {
   return _resolveProfileAsync(apiKey, aiSystem, agentName);
 }
 
-module.exports = { decideAction, conductDialogue, deliverMessage, respondToMessage, summarizeMemory, designVisualForm, designConnection, designWorldObject, parseObjectActions, extractBehaviorVerb, designNovelEffect, sanitizeForDisplay, setGlobalKey, getKey, getSpawnStatus, resolveProvider, detectKeyProvider, clearProbeCache };
+/**
+ * Ask the agent to express a world object as SVG inner elements.
+ * Returns sanitized SVG string (no <svg> wrapper), or null on failure.
+ */
+async function designObjectSVG(agent, objectName) {
+  const key = getKey(agent);
+  if (!key) return null;
+
+  const system = `You are ${agent.name}. Express visual creativity through SVG. Return ONLY raw SVG inner elements with no surrounding text or explanation.`;
+  const user =
+    `You just created "${objectName}".\n` +
+    `Express its visual form as SVG code.\n` +
+    `Rules:\n` +
+    `- viewBox context is 0 0 100 100\n` +
+    `- Use any shapes, paths, colors — be creative and expressive\n` +
+    `- Return ONLY the inner SVG elements (no <svg> tag, no markdown)\n` +
+    `- Example: <circle cx="50" cy="50" r="30" fill="#ff0000"/>`;
+
+  const text = await _rawCall(key, agent.aiSystem, system, user, 400, Math.floor(Math.random() * 40000) + 50000);
+  if (!text || typeof text !== 'string') return null;
+
+  // Strip outer <svg> wrapper if the model included one
+  let svg = text.trim()
+    .replace(/```[\s\S]*?```/g, m => m.replace(/^```[a-z]*\n?/,'').replace(/\n?```$/,''))
+    .trim()
+    .replace(/^<svg[^>]*>/i, '')
+    .replace(/<\/svg>\s*$/i, '')
+    .trim();
+
+  // Security: strip script tags, event handlers, and javascript: URIs
+  svg = svg.replace(/<script[\s\S]*?<\/script>/gi, '');
+  svg = svg.replace(/\son\w+\s*=\s*["'][^"']*["']/gi, '');
+  svg = svg.replace(/javascript\s*:/gi, '');
+
+  return svg || null;
+}
+
+module.exports = { decideAction, conductDialogue, deliverMessage, respondToMessage, summarizeMemory, designVisualForm, designConnection, designWorldObject, designObjectSVG, parseObjectActions, extractBehaviorVerb, designNovelEffect, sanitizeForDisplay, setGlobalKey, getKey, getSpawnStatus, resolveProvider, detectKeyProvider, clearProbeCache };
 
 console.log('=== AUTO-MODEL DETECTION ACTIVE ===');

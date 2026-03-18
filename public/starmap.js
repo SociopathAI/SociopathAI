@@ -99,6 +99,7 @@ class Starmap {
     // World objects — persistent glowing markers
     this.worldObjects   = [];        // [{ ...serverData, x, y, spawnAnimT, pulsePhase }]
     this._serverWOMap   = new Map(); // id → server obj, for new-object detection
+    this._svgImageCache = new Map(); // id → { svg, img, loading, failed }
 
     // Interaction state
     this.highlightedAgent = null;
@@ -441,10 +442,16 @@ class Starmap {
           pulsePhase: Math.random() * Math.PI * 2,
         });
       } else {
-        // Update appearance if it just arrived from server (async LLM)
+        // Update appearance / visualSVG if they just arrived from server (async LLM)
         const cObj = this.worldObjects.find(o => o.id === sObj.id);
-        if (cObj && !cObj.appearance && sObj.appearance) {
-          cObj.appearance = sObj.appearance;
+        if (cObj) {
+          if (!cObj.appearance && sObj.appearance) {
+            cObj.appearance = sObj.appearance;
+          }
+          if (!cObj.visualSVG && sObj.visualSVG) {
+            cObj.visualSVG = sObj.visualSVG;
+            this._svgImageCache.delete(sObj.id); // invalidate so it re-renders
+          }
         }
       }
     }
@@ -1817,8 +1824,75 @@ class Starmap {
     }
   }
 
+  /**
+   * Returns a ready HTMLImageElement for obj.visualSVG, or null if not yet loaded.
+   * Kicks off async image creation on first call; subsequent frames get the cached result.
+   */
+  _getSVGImage(obj) {
+    const cached = this._svgImageCache.get(obj.id);
+    if (cached) {
+      if (cached.svg !== obj.visualSVG) {
+        // SVG changed — invalidate and recreate
+        this._svgImageCache.delete(obj.id);
+      } else {
+        return cached.img || null; // null while loading or failed
+      }
+    }
+
+    // Mark as loading immediately to avoid duplicate requests
+    this._svgImageCache.set(obj.id, { svg: obj.visualSVG, img: null, loading: true });
+
+    const svgMarkup = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" width="80" height="80">${obj.visualSVG}</svg>`;
+    const blob = new Blob([svgMarkup], { type: 'image/svg+xml' });
+    const url  = URL.createObjectURL(blob);
+    const img  = new Image(80, 80);
+    img.onload = () => {
+      URL.revokeObjectURL(url);
+      this._svgImageCache.set(obj.id, { svg: obj.visualSVG, img, loading: false });
+    };
+    img.onerror = () => {
+      URL.revokeObjectURL(url);
+      this._svgImageCache.set(obj.id, { svg: obj.visualSVG, img: null, loading: false, failed: true });
+    };
+    img.src = url;
+    return null; // not ready yet — caller uses fallback
+  }
+
   /** Draw a world object using its AI-designed appearance, or agent-color fallback. */
   _drawAIDesignedObject(ctx, t, obj, pulse, agent) {
+
+    // ── AI SVG visualization (highest priority) ──────────────────────────────
+    if (obj.visualSVG) {
+      const glowColor = obj.appearance?.glowColor
+                     || agent?.visualForm?.primaryColor
+                     || this._woGlowColor(obj.type);
+
+      // Glow halo behind the SVG
+      const grd = ctx.createRadialGradient(0, 0, 0, 0, 0, 48);
+      grd.addColorStop(0, hexRgba(glowColor, 0.35 * pulse));
+      grd.addColorStop(0.5, hexRgba(glowColor, 0.12));
+      grd.addColorStop(1, hexRgba(glowColor, 0));
+      ctx.fillStyle = grd;
+      ctx.beginPath(); ctx.arc(0, 0, 48, 0, Math.PI * 2); ctx.fill();
+
+      const img = this._getSVGImage(obj);
+      if (img) {
+        // Clip to 80×80 circle so SVG content never overflows
+        ctx.save();
+        ctx.beginPath(); ctx.arc(0, 0, 40, 0, Math.PI * 2); ctx.clip();
+        ctx.drawImage(img, -40, -40, 80, 80);
+        ctx.restore();
+      } else {
+        // SVG loading or failed — draw fallback circle while waiting
+        const fc = glowColor;
+        ctx.shadowColor = fc; ctx.shadowBlur = 14;
+        ctx.fillStyle   = hexRgba(fc, 0.4);
+        ctx.beginPath(); ctx.arc(0, 0, 12 * pulse, 0, Math.PI * 2); ctx.fill();
+        ctx.shadowBlur  = 0;
+      }
+      return;
+    }
+
     const ap = obj.appearance;
 
     // Fallback: use agent's primary color; vary shape by object type
