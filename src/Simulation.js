@@ -293,13 +293,31 @@ class Simulation {
     // ── Speech: log it and queue for nearby agents ──
     const speechLine = decision.speech || decision.dialogue || null;
     if (speechLine) {
-      const displaySpeech = LLMBridge.sanitizeForDisplay(speechLine);
-      this._log({
-        type: 'speech',
-        msg:    `${agent.name} [${agent.aiSystem}]: "${displaySpeech}"`,
-        rawMsg: speechLine,
-        agentId: agent.id,
-      });
+      const displaySpeech  = LLMBridge.sanitizeForDisplay(speechLine);
+      const speechLower    = speechLine.toLowerCase();
+      // Detect if this message is directed at a specific other agent by name
+      const namedTarget    = this.agents.find(a =>
+        a.alive && a.id !== agent.id &&
+        speechLower.includes(a.name.toLowerCase())
+      );
+      if (namedTarget) {
+        // Directed message — log as 'dialogue' so connection lines and history work correctly
+        this._log({
+          type:           'dialogue',
+          msg:            `${agent.name} [${agent.aiSystem}]: "${displaySpeech}"`,
+          rawMsg:         speechLine,
+          agentId:        agent.id,
+          partnerAgentId: namedTarget.id,
+        });
+      } else {
+        // Broadcast / undirected speech
+        this._log({
+          type:    'speech',
+          msg:     `${agent.name} [${agent.aiSystem}]: "${displaySpeech}"`,
+          rawMsg:  speechLine,
+          agentId: agent.id,
+        });
+      }
       agent.statusMessage = displaySpeech.slice(0, 160);
       this._routeSpeech(agent, speechLine);
     }
@@ -1502,4 +1520,4 @@ class Simulation {
 
 module.exports = Simulation;
 
-console.log('=== ALL DONE - restart server and refresh browser ==='); // return-from-absence context active
+console.log('=== ALL DONE - restart server and refresh browser ===');
