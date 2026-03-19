@@ -1028,8 +1028,11 @@ class Simulation {
     agent.dormantSince = Date.now();
     agent.lastSeenAt   = Date.now();   // record exact offline timestamp for return-context
     // Clear any pending decision so they don't act on stale LLM output when they return
-    agent.pendingLLMDecision = null;
-    agent.pendingDecision    = null;
+    agent.pendingLLMDecision  = null;
+    agent.pendingDecision     = null;
+    agent.rateLimitedUntil    = 0;
+    // Clear any pending LLM queue items for this agent
+    LLMBridge.clearAgentQueue(agent.apiKey, agent.name);
     // Stop the agent's independent LLM timer
     this._stopAgentTimer(agent);
     // Notify nearby agents so they mention the absence in their next LLM prompt

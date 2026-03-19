@@ -541,6 +541,21 @@ async function _drainQueue(hash) {
   q.running = false;
 }
 
+/** Clear all pending queue items for a specific agent (call on dormant). */
+function clearAgentQueue(apiKey, agentName) {
+  const hash = _keyHash(apiKey);
+  const q    = _keyQueues.get(hash);
+  if (!q || !q.queue.length) return;
+  const before = q.queue.length;
+  q.queue = q.queue.filter(item => {
+    if (item.label === agentName) { item.resolve(null); return false; }
+    return true;
+  });
+  if (q.queue.length < before) {
+    console.log(`[QUEUE] ${agentName} went dormant - queue cleared`);
+  }
+}
+
 /** Compute cooldown duration for a rate-limited model.
  *  Uses retry-after header when present; defaults to 300 s per spec. */
 function _rlSleepMs(retryAfterMs) {
@@ -1281,12 +1296,11 @@ async function decideAction(agent, world, allAgents, worldAwareness, incomingMsg
   if (text === _CONTEXT_TOO_LONG) {
     agent.smallContext      = true;
     agent.smallContextModel = agent.smallContextModel || agent.aiSystem;
-    const modelLabel        = agent.smallContextModel;
-    console.log(`[${agent.name}] using adaptive truncation for ${modelLabel} to prevent 413 error.`);
+    console.log(`[413] ${agent.name} prompt too large - skipping this cycle, will retry next`);
     const truncUser = _buildDecisionUser(agent, worldAwareness, incomingMsgs, pendingEvent, isFirst, true);
     text = await _rawCall(key, agent.aiSystem, system, truncUser, 400, timeoutMs, agent.name);
     if (text === _CONTEXT_TOO_LONG || !text) {
-      console.warn(`[${agent.name}] truncated retry also failed — skipping cycle`);
+      console.log(`[413] ${agent.name} prompt too large - skipping this cycle, will retry next`);
       return null;
     }
   }
@@ -1741,6 +1755,6 @@ async function designObjectSVG(agent, objectName) {
   return svg || null;
 }
 
-module.exports = { decideAction, conductDialogue, deliverMessage, respondToMessage, summarizeMemory, designVisualForm, designConnection, designWorldObject, designObjectSVG, categorizeWorldObject, parseObjectActions, extractBehaviorVerb, designNovelEffect, sanitizeForDisplay, setGlobalKey, getKey, getSpawnStatus, resolveProvider, detectKeyProvider, clearProbeCache };
+module.exports = { decideAction, conductDialogue, deliverMessage, respondToMessage, summarizeMemory, designVisualForm, designConnection, designWorldObject, designObjectSVG, categorizeWorldObject, parseObjectActions, extractBehaviorVerb, designNovelEffect, sanitizeForDisplay, setGlobalKey, getKey, getSpawnStatus, resolveProvider, detectKeyProvider, clearProbeCache, clearAgentQueue };
 
 console.log('=== AUTO-MODEL DETECTION ACTIVE ===');
