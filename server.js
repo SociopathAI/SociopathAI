@@ -245,14 +245,36 @@ function _verifySession(token) {
     });
     for (const n of restoredNames) usedNames.add(n);
 
-    // Rebuild in-memory session map from restored agents
-    for (const a of sim.agents) {
-      if (a.sessionToken && a.sessionExpires && Date.now() < a.sessionExpires) {
-        _sessions.set(a.sessionToken, { agentId: a.id, expires: a.sessionExpires });
+    // ── Legacy data detection: if any agent has a key fingerprint but no password_hash,
+    //    they belong to the old API-key auth system. Wipe everything and start fresh.
+    const _legacyAgents = sim.agents.filter(a => (a.keySalt || a.keyHash) && !a.passwordHash);
+    if (_legacyAgents.length > 0) {
+      console.log(`[LEGACY] Detected ${_legacyAgents.length} agent(s) from old API-key system — wiping all data for fresh start.`);
+      if (Database.usePg && Database.getPool()) {
+        const _tables = ['agents','events','conversations','objects','object_meta','chat','world','used_names'];
+        for (const t of _tables) {
+          try { await Database.getPool().query(`TRUNCATE TABLE ${t} CASCADE`); }
+          catch (e) { console.warn(`[LEGACY] Could not truncate ${t}: ${e.message}`); }
+        }
+        console.log('[LEGACY] PostgreSQL tables wiped.');
+      } else {
+        // JSON file mode — reset in-memory and overwrite files on next save
+        console.log('[LEGACY] JSON mode — data will be cleared on next save.');
       }
-      // Re-attach admin key for Groq agents
-      const adminKey = process.env.ADMIN_GROQ_KEY;
-      if (adminKey && a.aiSystem === 'Groq' && !a.apiKey) a.apiKey = adminKey;
+      // Reset in-memory state entirely
+      sim.agents.length = 0;
+      usedNames.clear();
+      console.log('[LEGACY] World reset. All agents must re-register with nickname + password.');
+    } else {
+      // Rebuild in-memory session map from restored agents
+      for (const a of sim.agents) {
+        if (a.sessionToken && a.sessionExpires && Date.now() < a.sessionExpires) {
+          _sessions.set(a.sessionToken, { agentId: a.id, expires: a.sessionExpires });
+        }
+        // Re-attach admin key for Groq agents
+        const adminKey = process.env.ADMIN_GROQ_KEY;
+        if (adminKey && a.aiSystem === 'Groq' && !a.apiKey) a.apiKey = adminKey;
+      }
     }
 
     console.log(`LOADED: ${_preCounts.agents} agents, ${_preCounts.conversations} conversations, ${_preCounts.events} events, ${_preCounts.objects} objects`);
