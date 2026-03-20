@@ -453,9 +453,12 @@ socket.on('connect', () => {
 
 // On actual tab/browser close: signal server immediately so agent exits cleanly
 window.addEventListener('beforeunload', () => {
-  const myAgents = SocioLLM.loadMyAgents ? Object.keys(SocioLLM.loadMyAgents()) : [];
+  const myAgentId = sessionStorage.getItem('my_agent_id');
+  if (myAgentId) socket.emit('agentExit', { agentId: myAgentId });
+  // Legacy: also check SocioLLM.loadMyAgents if it exists
+  const myAgents = (typeof SocioLLM !== 'undefined' && SocioLLM.loadMyAgents) ? Object.keys(SocioLLM.loadMyAgents()) : [];
   for (const agentId of myAgents) {
-    socket.emit('agentExit', { agentId });
+    if (agentId !== myAgentId) socket.emit('agentExit', { agentId });
   }
 });
 
@@ -3323,401 +3326,239 @@ function toggleArchiveCiv(number) {
   if (card) card.classList.toggle('expanded');
 }
 
+// ─── SESSION HELPERS ───
+function _registerMyAgent(agentId, name, aiSystem) {
+  sessionStorage.setItem('my_agent_id',   agentId);
+  sessionStorage.setItem('my_agent_name', name || '');
+  // Keep SocioLLM in sync for legacy My AI History panel
+  if (typeof SocioLLM !== 'undefined' && SocioLLM.registerAgent) {
+    SocioLLM.registerAgent(agentId, name, aiSystem || 'Groq');
+  }
+}
+
+// Client-side password policy (mirrors server)
+function validatePasswordClient(pw) {
+  if (!pw || pw.length < 8)   return 'Password must be at least 8 characters';
+  if (!/[A-Z]/.test(pw))      return 'Must contain at least 1 uppercase letter';
+  if (!/[a-z]/.test(pw))      return 'Must contain at least 1 lowercase letter';
+  if (!/[0-9]/.test(pw))      return 'Must contain at least 1 number';
+  if (!/[!@#$%^&*]/.test(pw)) return 'Must contain at least 1 special character (!@#$%^&*)';
+  return null;
+}
+
 // ─── ONBOARDING OVERLAY ───
 (function initOnboarding() {
   const overlay = document.getElementById('onboarding');
   if (!overlay) return;
   if (_isPreview) { overlay.style.display = 'none'; return; }
 
-  // Already done this session — hide overlay and try to re-identify silently
-  if (sessionStorage.getItem('ob_done')) {
-    overlay.style.display = 'none';
-    // Re-identify socket on every page load so dormant detection works correctly
+  // ── Check localStorage for existing session token ──
+  const storedToken = localStorage.getItem('sai_session_token');
+  if (storedToken) {
+    overlay.style.display = 'none'; // hide while verifying
     (async () => {
-      const stored = SocioLLM.loadKey();
-      if (!stored?.key) return;
       try {
         const res  = await fetch('/api/agent/reconnect', {
-          method: 'POST',
+          method:  'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ apiKey: stored.key }),
+          body:    JSON.stringify({ token: storedToken }),
         });
         const data = await res.json();
         if (data.found && data.agent?.id) {
-          SocioLLM.registerAgent(data.agent.id, data.agent.name, data.agent.aiSystem);
+          _registerMyAgent(data.agent.id, data.agent.name, data.agent.aiSystem);
           socket.emit('identify', { agentId: data.agent.id });
+          return; // stay hidden — session valid
         }
       } catch {}
+      // Token invalid or expired — show onboarding
+      localStorage.removeItem('sai_session_token');
+      overlay.style.display = '';
     })();
     return;
   }
 
-  // ── Auto-reconnect: if a key is stored from a previous session, try reconnect silently ──
-  (async () => {
-    const stored = SocioLLM.loadKey();
-    if (!stored?.key) return;
-    try {
-      const res  = await fetch('/api/agent/reconnect', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ apiKey: stored.key }),
-      });
-      const data = await res.json();
-      if (data.found) {
-        // Re-register key and dismiss silently
-        SocioLLM.saveKey(stored.key, data.agent?.aiSystem || stored.aiSystem);
-        if (data.agent?.id) {
-          SocioLLM.registerAgent(data.agent.id, data.agent.name, data.agent.aiSystem);
-          // Wake the agent — tell server this socket owns them
-          socket.emit('identify', { agentId: data.agent.id });
-        }
-        sessionStorage.setItem('ob_done', '1');
-        overlay.style.display = 'none';
-      }
-    } catch {}
-  })();
+  // ── Card refs ──
+  const s1    = document.getElementById('ob-s1');
+  const s2    = document.getElementById('ob-s2');
+  const s3New = document.getElementById('ob-s3-new');
+  const s3Ret = document.getElementById('ob-s3-ret');
+  const s4    = document.getElementById('ob-s4');
+  const s5    = document.getElementById('ob-s5');
+  const sWb   = document.getElementById('ob-s-wb');
+  const dots  = document.querySelectorAll('#ob-dots .ob-dot');
 
-  const s1  = document.getElementById('ob-s1');
-  const s2  = document.getElementById('ob-s2');
-  const s3  = document.getElementById('ob-s3');
-  const s4  = document.getElementById('ob-s4');
-  const dots = document.querySelectorAll('.ob-dot');
+  const ALL_CARDS = [s1, s2, s3New, s3Ret, s4, s5, sWb].filter(Boolean);
 
-  function goTo(step) {
-    [s1, s2, s3].forEach((card, i) => card.classList.toggle('ob-hidden', i + 1 !== step));
-    dots.forEach((d, i) => d.classList.toggle('active', i + 1 <= step));
+  let _isReturning = false; // true when nickname is taken
+
+  function showCard(id) {
+    ALL_CARDS.forEach(c => c.classList.add('ob-hidden'));
+    const el = document.getElementById(id);
+    if (el) el.classList.remove('ob-hidden');
+  }
+
+  function setDots(n) {
+    dots.forEach((d, i) => d.classList.toggle('active', i < n));
   }
 
   function dismiss() {
-    sessionStorage.setItem('ob_done', '1');
     overlay.classList.add('ob-out');
     overlay.addEventListener('animationend', () => { overlay.style.display = 'none'; }, { once: true });
   }
 
-  const LOCK_SVG = `<svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="#FFD700" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>`;
+  // ── Step 1: Welcome ──
+  document.getElementById('ob-begin').addEventListener('click', () => {
+    showCard('ob-s2');
+    setDots(1);
+  });
 
-  // ── Field lock/unlock helpers ──
-  const nameInput  = document.getElementById('ob-name');
+  // ── Step 2: Nickname ──
+  const nickInput  = document.getElementById('ob-nickname');
+  const nickStatus = document.getElementById('ob-nick-status');
+  const nickErr    = document.getElementById('ob-nick-err');
+  let _nickDebounce = null;
+  let _nickChecked  = false; // true once server responded
+
+  document.getElementById('ob-back-s2').addEventListener('click', () => {
+    showCard('ob-s1'); setDots(0);
+  });
+
+  async function checkNickname(name) {
+    _nickChecked = false;
+    if (!name || name.length < 2) { nickStatus.textContent = ''; return; }
+    try {
+      const res  = await fetch(`/api/check-nickname?name=${encodeURIComponent(name)}`);
+      const data = await res.json();
+      _nickChecked = true;
+      if (data.error) {
+        nickStatus.innerHTML = `<span class="ob-nick-err-inline">${esc(data.error)}</span>`;
+        _isReturning = false;
+      } else if (data.available) {
+        nickStatus.innerHTML = '<span class="ob-nick-ok">&#10003; Available — new agent</span>';
+        _isReturning = false;
+      } else {
+        nickStatus.innerHTML = '<span class="ob-nick-taken">Welcome back! Enter your password to continue.</span>';
+        _isReturning = true;
+      }
+    } catch { _nickChecked = false; }
+  }
+
+  nickInput.addEventListener('input', () => {
+    _nickChecked = false;
+    _isReturning = false;
+    nickStatus.textContent = '';
+    nickErr.textContent = '';
+    clearTimeout(_nickDebounce);
+    const v = nickInput.value.trim();
+    if (v.length >= 2) _nickDebounce = setTimeout(() => checkNickname(v), 400);
+  });
+
+  document.getElementById('ob-nick-next').addEventListener('click', async () => {
+    const name = nickInput.value.trim();
+    const err  = validateName(name);
+    if (err) { nickErr.textContent = err; return; }
+    nickErr.textContent = '';
+    if (!_nickChecked) await checkNickname(name);
+    if (_isReturning) {
+      document.getElementById('ob-ret-name-label').textContent = `Password for "${esc(name)}"`;
+      document.getElementById('ob-ret-title').textContent = `Welcome back, ${esc(name)}!`;
+      showCard('ob-s3-ret');
+      setDots(2);
+    } else {
+      showCard('ob-s3-new');
+      setDots(2);
+    }
+  });
+
+  // ── Step 3a: New user password ──
+  const pwInput    = document.getElementById('ob-password');
+  const pw2Input   = document.getElementById('ob-password2');
+  const pwErrEl    = document.getElementById('ob-pw-err');
+  const pwBars     = document.querySelectorAll('.ob-pw-bar');
+  const pwCriteria = document.querySelectorAll('.ob-pw-crit');
+
+  document.getElementById('ob-back-s3-new').addEventListener('click', () => {
+    showCard('ob-s2'); setDots(1);
+  });
+
+  function updatePwStrength(pw) {
+    const checks = [
+      pw.length >= 8,
+      /[A-Z]/.test(pw),
+      /[a-z]/.test(pw),
+      /[0-9]/.test(pw),
+      /[!@#$%^&*]/.test(pw),
+    ];
+    const score = checks.filter(Boolean).length;
+    const cls   = score <= 2 ? 'weak' : score <= 4 ? 'fair' : 'strong';
+    pwBars.forEach((bar, i) => {
+      bar.className = 'ob-pw-bar' + (i < score ? ` ${cls}` : '');
+    });
+    pwCriteria.forEach((el, i) => el.classList.toggle('met', checks[i]));
+  }
+
+  pwInput.addEventListener('input', () => updatePwStrength(pwInput.value));
+
+  document.getElementById('ob-pw-next').addEventListener('click', () => {
+    const pw  = pwInput.value;
+    const pw2 = pw2Input.value;
+    const err = validatePasswordClient(pw);
+    if (err) { pwErrEl.textContent = err; return; }
+    if (pw !== pw2) { pwErrEl.textContent = 'Passwords do not match.'; return; }
+    pwErrEl.textContent = '';
+    showCard('ob-s4');
+    setDots(3);
+  });
+
+  // ── Step 4: Provider + Notes ──
   const notesInput = document.getElementById('ob-notes');
-
-  // Auto-resize notes textarea as user types (capped at 180px)
   notesInput.addEventListener('input', function () {
-    if (this.classList.contains('ob-locked')) return;
     this.style.height = 'auto';
     this.style.height = Math.min(this.scrollHeight, 180) + 'px';
   });
 
-  // Raw key stored before masking so it's available for deployment
-  let _rawKeyStored = '';
-
-  function _maskKey(key) {
-    if (!key || key.length <= 8) return '••••••••';
-    return key.slice(0, 4) + '…' + key.slice(-4);
-  }
-
-  function lockFields(agentName, educationNotes) {
-    nameInput.value = agentName;
-    nameInput.setAttribute('readonly', 'true');
-    nameInput.classList.add('ob-locked');
-
-    // Lock notice for name
-    let nameNotice = document.getElementById('ob-name-lock-notice');
-    if (!nameNotice) {
-      nameNotice = document.createElement('div');
-      nameNotice.id = 'ob-name-lock-notice';
-      nameNotice.className = 'ob-lock-notice';
-      nameInput.closest('.ob-field').appendChild(nameNotice);
-    }
-    nameNotice.innerHTML = `${LOCK_SVG} <span title="This cannot be changed after deployment">Agent name is permanent — cannot be changed.</span>`;
-
-    notesInput.value = educationNotes || '';
-    notesInput.setAttribute('disabled', 'true');
-    notesInput.classList.add('ob-locked');
-
-    let notesNotice = document.getElementById('ob-notes-lock-notice');
-    if (!notesNotice) {
-      notesNotice = document.createElement('div');
-      notesNotice.id = 'ob-notes-lock-notice';
-      notesNotice.className = 'ob-lock-notice';
-      notesInput.closest('.ob-field').appendChild(notesNotice);
-    }
-    notesNotice.innerHTML = `${LOCK_SVG} <span title="This cannot be changed after deployment">Education is permanent — cannot be changed.</span>`;
-
-    // Mask the API key display (store raw key first)
-    _rawKeyStored = obKeyInput.value.trim() || _rawKeyStored;
-    obKeyInput.value = _maskKey(_rawKeyStored);
-    obKeyInput.setAttribute('readonly', 'true');
-    obKeyInput.setAttribute('type', 'text');
-    obKeyInput.classList.add('ob-locked');
-
-    // Hide education notes guidance for returning users
-    const guidance = document.getElementById('ob-notes-guidance');
-    if (guidance) guidance.style.display = 'none';
-  }
-
-  function unlockFields() {
-    nameInput.removeAttribute('readonly');
-    nameInput.classList.remove('ob-locked');
-    notesInput.removeAttribute('disabled');
-    notesInput.classList.remove('ob-locked');
-    const nn = document.getElementById('ob-name-lock-notice');
-    const nl = document.getElementById('ob-notes-lock-notice');
-    if (nn) nn.remove();
-    if (nl) nl.remove();
-    const banner = document.getElementById('ob-welcome-banner');
-    if (banner) banner.remove();
-
-    // Restore API key input
-    if (_rawKeyStored && obKeyInput.classList.contains('ob-locked')) {
-      obKeyInput.value = _rawKeyStored;
-    }
-    obKeyInput.removeAttribute('readonly');
-    obKeyInput.setAttribute('type', 'password');
-    obKeyInput.classList.remove('ob-locked');
-
-    // Show education notes guidance for new users
-    const guidance = document.getElementById('ob-notes-guidance');
-    if (guidance) guidance.style.display = '';
-  }
-
-  function showWelcomeBack(rcData) {
-    const a = rcData.agent;
-    _rawKeyStored = obKeyInput.value.trim() || _rawKeyStored;
-    SocioLLM.saveKey(_rawKeyStored, a?.aiSystem || 'Other');
-    if (a?.id) {
-      SocioLLM.registerAgent(a.id, a.name, a.aiSystem);
-      socket.emit('identify', { agentId: a.id });
-    }
-
-    // Lock form fields with agent's original data
-    lockFields(a?.name || '', a?.educationNotes || '');
-
-    // Show green inline banner in Step 2 (visible before auto-navigate)
-    let banner = document.getElementById('ob-welcome-banner');
-    if (!banner) {
-      banner = document.createElement('div');
-      banner.id = 'ob-welcome-banner';
-      banner.className = 'ob-welcome-banner';
-      s2.querySelector('.ob-fields').insertAdjacentElement('beforebegin', banner);
-    }
-    banner.textContent = `Welcome back, ${esc(a?.name || 'friend')}! Your agent is ready.`;
-
-    // Populate step 4 content (built while user sees the banner)
-    const wbTitle = document.getElementById('ob-wb-title');
-    const wbSub   = document.getElementById('ob-wb-sub');
-    const wbAgent = document.getElementById('ob-wb-agent');
-    const isRevived = rcData.revived;
-    if (wbTitle) wbTitle.textContent = isRevived
-      ? `${a?.name || 'Your agent'} has returned!`
-      : `Welcome back, ${a?.name || 'friend'}!`;
-    if (wbSub) wbSub.textContent = rcData.message || 'Your agent remembers you.';
-    if (wbAgent && a) {
-      wbAgent.innerHTML = `
-        <div class="ob-wb-row"><span class="ob-wb-k">Agent</span><span class="ob-wb-v">${esc(a.name)}</span></div>
-        <div class="ob-wb-row"><span class="ob-wb-k">Status</span><span class="ob-wb-v ob-wb-alive">${isRevived ? '✨ Revived' : '&#9679; Alive'}</span></div>
-        <div class="ob-wb-row"><span class="ob-wb-k">Age</span><span class="ob-wb-v">${a.age ?? '—'}</span></div>
-        <div class="ob-wb-row"><span class="ob-wb-k">AI System</span><span class="ob-wb-v"><span class="ai-chip ${esc(a.aiSystem)}">${esc(a.aiSystem)}</span></span></div>
-        ${a.educationNotes ? `<div class="ob-wb-row" style="align-items:flex-start"><span class="ob-wb-k">Education</span><span class="ob-wb-v" style="text-align:right;max-width:65%;font-size:11px;opacity:0.8">${esc(a.educationNotes)}</span></div>` : ''}
-      `;
-    }
-
-    // Auto-navigate to welcome-back card after 1.5s (user sees green banner first)
-    setTimeout(() => {
-      [s1, s2, s3].forEach(c => c.classList.add('ob-hidden'));
-      if (s4) s4.classList.remove('ob-hidden');
-      dots.forEach(d => d.classList.add('active'));
-    }, 1500);
-  }
-
-  // ── Step 1 → 2 ──
-  document.getElementById('ob-begin').addEventListener('click', () => goTo(2));
-
-  // ── Step 2 → 1: back ──
-  document.getElementById('ob-back-s2').addEventListener('click', () => {
-    unlockFields();
-    goTo(1);
+  document.getElementById('ob-back-s4').addEventListener('click', () => {
+    showCard('ob-s3-new'); setDots(2);
   });
 
-  // ── Step 3 → 2: back ──
-  document.getElementById('ob-back').addEventListener('click', () => goTo(2));
-
-  // ── API key field wiring ──
-  const obKeyInput  = document.getElementById('ob-apikey');
-  const obKeyBadge  = document.getElementById('ob-key-badge');
-  const obKeyErr    = document.getElementById('ob-key-err');
-  const obKeyToggle = document.getElementById('ob-key-show');
-
-  // Debounced reconnect check state
-  let _rcDebounce  = null;
-  let _rcResult    = null;  // cache result so Continue click doesn't re-fetch
-  let _rcInFlight  = false; // prevent concurrent lookups
-  const obChecking = document.getElementById('ob-key-checking');
-
-  async function tryReconnectLookup(key) {
-    if (!key || key.length < 20) { _rcResult = null; unlockFields(); return; }
-    if (_rcInFlight) return;
-    _rcInFlight = true;
-    if (obChecking) obChecking.style.display = 'flex';
-    try {
-      const res  = await fetch('/api/agent/reconnect', {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ apiKey: key }),
-      });
-      _rcResult = await res.json();
-      if (_rcResult.found) showWelcomeBack(_rcResult);
-      else unlockFields();
-    } catch { _rcResult = null; }
-    finally {
-      _rcInFlight = false;
-      if (obChecking) obChecking.style.display = 'none';
-    }
-  }
-
-  // Show/hide toggle (only when not locked)
-  if (obKeyToggle) {
-    obKeyToggle.addEventListener('click', () => {
-      if (obKeyInput.classList.contains('ob-locked')) return;
-      const showing = obKeyInput.type === 'text';
-      obKeyInput.type = showing ? 'password' : 'text';
-      obKeyToggle.title = showing ? 'Show key' : 'Hide key';
-    });
-  }
-
-  // Pre-fill from session storage and trigger lookup
-  const storedKey = SocioLLM.loadKey();
-  if (storedKey?.key) {
-    _rawKeyStored = storedKey.key;
-    obKeyInput.value = storedKey.key;
-    applyKeyDetection(obKeyInput, obKeyBadge, 'ob-ai');
-    tryReconnectLookup(storedKey.key);
-  }
-
-  obKeyInput.addEventListener('input', () => {
-    if (obKeyInput.classList.contains('ob-locked')) return;
-    if (obKeyErr) obKeyErr.textContent = '';
-    applyKeyDetection(obKeyInput, obKeyBadge, 'ob-ai');
-    // Unlock immediately when key changes (user may be entering a new key)
-    unlockFields();
-    _rcResult = null;
-    clearTimeout(_rcDebounce);
-    const key = obKeyInput.value.trim();
-    _rawKeyStored = key;
-    if (key.length >= 20) {
-      _rcDebounce = setTimeout(() => tryReconnectLookup(key), 500);
-    }
-  });
-
-  // Blur: trigger lookup immediately when user leaves the key field
-  obKeyInput.addEventListener('blur', () => {
-    if (obKeyInput.classList.contains('ob-locked')) return;
-    clearTimeout(_rcDebounce);
-    const key = obKeyInput.value.trim();
-    _rawKeyStored = key;
-    if (key.length >= 20 && !_rcInFlight) {
-      tryReconnectLookup(key);
-    }
-  });
-
-  // ── Step 2 → 3: validate, check reconnect, then build summary ──
-  document.getElementById('ob-continue').addEventListener('click', async () => {
-    const name   = nameInput.value.trim();
-    const apiKey = obKeyInput.classList.contains('ob-locked') ? _rawKeyStored : obKeyInput.value.trim();
-    const nameFieldErr = document.getElementById('ob-name-err');
-
-    // API key is required
-    if (!apiKey) {
-      obKeyErr.textContent = 'An API key is required to power your agent\'s decisions.';
-      obKeyInput.focus();
-      return;
-    }
-    obKeyErr.textContent = '';
-
-    // Use cached reconnect result or fetch now
-    let rcData = _rcResult;
-    if (!rcData) {
-      try {
-        const rcRes = await fetch('/api/agent/reconnect', {
-          method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ apiKey }),
-        });
-        rcData = await rcRes.json();
-        _rcResult = rcData;
-      } catch { rcData = null; }
-    }
-
-    if (rcData?.found) {
-      showWelcomeBack(rcData);
-      return;
-    }
-
-    // ── Normal flow: validate name and continue to step 3 ──
-    const nameErr = validateName(name);
-    if (nameErr) { nameFieldErr.textContent = nameErr; return; }
-    nameFieldErr.textContent = '';
-
-    const aiSystem = (document.querySelector('input[name="ob-ai"]:checked') || {}).value || 'Other';
-    const notes    = notesInput.value.trim();
-    const detected = SocioLLM.detectedSystemName(apiKey);
-
+  document.getElementById('ob-notes-next').addEventListener('click', () => {
+    const name  = nickInput.value.trim();
+    const notes = notesInput.value.trim();
     document.getElementById('ob-summary').innerHTML = `
-      <div class="ob-sum-row">
-        <div class="ob-sum-label">Agent Name</div>
-        <div class="ob-sum-val">${esc(name)}</div>
-      </div>
-      <div class="ob-sum-row">
-        <div class="ob-sum-label">API Key</div>
-        <div class="ob-sum-val">
-          <span class="ob-key-summary-val">••••••••••••${esc(apiKey.slice(-4))}</span>
-          ${detected ? `<span class="ob-key-badge detected">${esc(detected)}</span>` : ''}
-        </div>
-      </div>
-      <div class="ob-sum-row">
-        <div class="ob-sum-label">AI System</div>
-        <div class="ob-sum-val"><span class="ai-chip ${esc(aiSystem)}">${esc(aiSystem)}</span></div>
-      </div>
-      ${notes ? `<div class="ob-sum-row">
-        <div class="ob-sum-label">Education</div>
-        <div class="ob-sum-notes">${esc(notes)}</div>
-      </div>` : ''}
+      <div class="ob-sum-row"><div class="ob-sum-label">Agent Name</div><div class="ob-sum-val">${esc(name)}</div></div>
+      <div class="ob-sum-row"><div class="ob-sum-label">AI Provider</div><div class="ob-sum-val"><span class="ai-chip Groq">Groq</span></div></div>
+      ${notes ? `<div class="ob-sum-row"><div class="ob-sum-label">Education</div><div class="ob-sum-notes">${esc(notes)}</div></div>` : ''}
     `;
-
-    goTo(3);
+    showCard('ob-s5');
+    setDots(4);
   });
 
-  // ── Welcome-back: enter world ──
-  const wbEnterBtn = document.getElementById('ob-wb-enter');
-  if (wbEnterBtn) {
-    wbEnterBtn.addEventListener('click', () => dismiss());
-  }
+  // ── Step 5: Deploy ──
+  document.getElementById('ob-back-s5').addEventListener('click', () => {
+    showCard('ob-s4'); setDots(3);
+  });
 
-  // ── Deploy ──
   document.getElementById('ob-deploy-btn').addEventListener('click', async () => {
-    const name     = nameInput.value.trim();
-    // Use stored raw key (obKeyInput may show masked version for returning users)
-    const apiKey   = obKeyInput.classList.contains('ob-locked') ? _rawKeyStored : obKeyInput.value.trim();
-    const aiSystem = (document.querySelector('input[name="ob-ai"]:checked') || {}).value || 'Other';
-    const notes    = notesInput.value.trim();
-    const btn      = document.getElementById('ob-deploy-btn');
-    const errEl    = document.getElementById('ob-deploy-err');
+    const btn   = document.getElementById('ob-deploy-btn');
+    const errEl = document.getElementById('ob-deploy-err');
+    const name  = nickInput.value.trim();
+    const pw    = pwInput.value;
+    const notes = notesInput.value.trim();
 
     btn.disabled    = true;
     btn.textContent = 'Deploying\u2026';
 
     try {
-      const res = await fetch('/api/agent', {
-        method: 'POST',
+      const res  = await fetch('/api/register', {
+        method:  'POST',
         headers: { 'Content-Type': 'application/json' },
-        // apiKey sent to server and stored in-memory on the agent object only.
-        // Never persisted, never logged, never echoed back in state.
-        body: JSON.stringify({ name, aiSystem, education: { aiSystem, notes, apiKey } }),
+        body:    JSON.stringify({ nickname: name, password: pw, notes }),
       });
       const data = await res.json();
 
       if (data.success) {
-        // Keep a local record so the UI can show which agents this browser deployed
-        SocioLLM.saveKey(apiKey, aiSystem);
-        SocioLLM.registerAgent(data.agent.id, data.agent.name, data.agent.aiSystem);
-        // Tell server which agent this socket owns (enables dormant detection on disconnect)
+        localStorage.setItem('sai_session_token', data.token);
+        _registerMyAgent(data.agent.id, data.agent.name, data.agent.aiSystem || 'Groq');
         socket.emit('identify', { agentId: data.agent.id });
         dismiss();
       } else {
@@ -3731,6 +3572,65 @@ function toggleArchiveCiv(number) {
       btn.textContent = 'Deploy into the World';
     }
   });
+
+  // ── Step 3b: Returning user login ──
+  const retPwInput = document.getElementById('ob-ret-password');
+  const retPwErr   = document.getElementById('ob-ret-pw-err');
+
+  document.getElementById('ob-back-s3-ret').addEventListener('click', () => {
+    showCard('ob-s2'); setDots(1);
+  });
+
+  document.getElementById('ob-ret-login-btn').addEventListener('click', async () => {
+    const btn  = document.getElementById('ob-ret-login-btn');
+    const name = nickInput.value.trim();
+    const pw   = retPwInput.value;
+
+    if (!pw) { retPwErr.textContent = 'Password is required.'; return; }
+    retPwErr.textContent = '';
+    btn.disabled    = true;
+    btn.textContent = 'Signing in\u2026';
+
+    try {
+      const res  = await fetch('/api/login', {
+        method:  'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body:    JSON.stringify({ nickname: name, password: pw }),
+      });
+      const data = await res.json();
+
+      if (data.success) {
+        localStorage.setItem('sai_session_token', data.token);
+        const a = data.agent;
+        _registerMyAgent(a.id, a.name, a.aiSystem || 'Groq');
+        socket.emit('identify', { agentId: a.id });
+
+        // Populate welcome back card
+        document.getElementById('ob-wb-title').textContent = `Welcome back, ${esc(a.name)}!`;
+        document.getElementById('ob-wb-sub').textContent   = 'Your agent remembers you.';
+        document.getElementById('ob-wb-agent').innerHTML   = `
+          <div class="ob-wb-row"><span class="ob-wb-k">Agent</span><span class="ob-wb-v">${esc(a.name)}</span></div>
+          <div class="ob-wb-row"><span class="ob-wb-k">Status</span><span class="ob-wb-v ob-wb-alive">&#9679; Alive</span></div>
+          <div class="ob-wb-row"><span class="ob-wb-k">AI System</span><span class="ob-wb-v"><span class="ai-chip Groq">Groq</span></span></div>
+          ${a.educationNotes ? `<div class="ob-wb-row" style="align-items:flex-start"><span class="ob-wb-k">Education</span><span class="ob-wb-v" style="text-align:right;max-width:65%;font-size:11px;opacity:0.8">${esc(a.educationNotes)}</span></div>` : ''}
+        `;
+        showCard('ob-s-wb');
+        setDots(3);
+      } else {
+        retPwErr.textContent = data.error || 'Login failed.';
+        btn.disabled    = false;
+        btn.textContent = 'Sign In \u2192';
+      }
+    } catch {
+      retPwErr.textContent = 'Server error — please try again.';
+      btn.disabled    = false;
+      btn.textContent = 'Sign In \u2192';
+    }
+  });
+
+  // ── Welcome back: enter world ──
+  document.getElementById('ob-wb-enter').addEventListener('click', () => dismiss());
+
 })();
 
 // ─── GLOBAL KEYS MODAL ────────────────────────────────────────────────────────

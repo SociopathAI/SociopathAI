@@ -103,6 +103,16 @@ async function initDb() {
     ALTER TABLE agents ADD COLUMN IF NOT EXISTS last_seen_at     BIGINT  DEFAULT 0;
   `);
 
+  // Auth columns — nickname+password system
+  await _pool.query(`
+    ALTER TABLE agents ADD COLUMN IF NOT EXISTS password_hash   TEXT;
+    ALTER TABLE agents ADD COLUMN IF NOT EXISTS password_salt   TEXT;
+    ALTER TABLE agents ADD COLUMN IF NOT EXISTS login_attempts  INT    DEFAULT 0;
+    ALTER TABLE agents ADD COLUMN IF NOT EXISTS locked_until    BIGINT DEFAULT 0;
+    ALTER TABLE agents ADD COLUMN IF NOT EXISTS session_token   TEXT;
+    ALTER TABLE agents ADD COLUMN IF NOT EXISTS session_expires BIGINT;
+  `);
+
   // Indexes (safe to run repeatedly)
   await _pool.query(`
     CREATE INDEX IF NOT EXISTS events_ts_idx       ON events (ts);

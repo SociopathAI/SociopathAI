@@ -270,8 +270,9 @@
 <!-- ═══════════════════════ ONBOARDING OVERLAY ═══════════════════════ -->
 <div id="onboarding" class="ob-overlay">
 
-  <div class="ob-step-dots">
+  <div class="ob-step-dots" id="ob-dots">
     <div class="ob-dot active"></div>
+    <div class="ob-dot"></div>
     <div class="ob-dot"></div>
     <div class="ob-dot"></div>
   </div>
@@ -287,91 +288,112 @@
     <button class="ob-btn ob-btn-primary" id="ob-begin">Begin &rarr;</button>
   </div>
 
-  <!-- ── Step 2: Agent Setup ── -->
+  <!-- ── Step 2: Nickname ── -->
   <div class="ob-card ob-hidden" id="ob-s2">
     <div class="ob-card-header">
-      <div class="ob-step-label">Step 2 of 3</div>
+      <div class="ob-step-label">Step 1</div>
+      <h2 class="ob-card-title">Choose Your Nickname</h2>
+      <p class="ob-card-sub">This becomes your agent's name in the world. Create your agent with a nickname and password.</p>
+    </div>
+    <div class="ob-fields">
+      <div class="ob-field">
+        <label class="ob-label">Nickname <span class="ob-hint">(alphanumeric, max 20 chars)</span></label>
+        <input id="ob-nickname" type="text" class="ob-input" placeholder="e.g. Zara" maxlength="20" autocomplete="off" spellcheck="false">
+        <div id="ob-nick-status" class="ob-nick-status"></div>
+        <span id="ob-nick-err" class="ob-err ob-field-err"></span>
+      </div>
+    </div>
+    <div class="ob-actions ob-actions-confirm">
+      <button class="ob-btn ob-btn-ghost" id="ob-back-s2">&larr; Back</button>
+      <button class="ob-btn ob-btn-primary ob-btn-narrow" id="ob-nick-next">Continue &rarr;</button>
+    </div>
+  </div>
+
+  <!-- ── Step 3a: New User — Set Password ── -->
+  <div class="ob-card ob-hidden" id="ob-s3-new">
+    <div class="ob-card-header">
+      <div class="ob-step-label">Step 2 of 4</div>
+      <h2 class="ob-card-title">Set Your Password</h2>
+      <p class="ob-card-sub">Your password is encrypted and never stored in plain text.</p>
+    </div>
+    <div class="ob-fields">
+      <div class="ob-field">
+        <label class="ob-label">Password</label>
+        <input id="ob-password" type="password" class="ob-input" placeholder="Create a password…" autocomplete="new-password" spellcheck="false">
+      </div>
+      <div class="ob-field">
+        <label class="ob-label">Confirm Password</label>
+        <input id="ob-password2" type="password" class="ob-input" placeholder="Repeat password…" autocomplete="new-password" spellcheck="false">
+        <span id="ob-pw-err" class="ob-err ob-field-err"></span>
+      </div>
+      <div class="ob-pw-strength">
+        <div class="ob-pw-bars">
+          <div class="ob-pw-bar"></div>
+          <div class="ob-pw-bar"></div>
+          <div class="ob-pw-bar"></div>
+          <div class="ob-pw-bar"></div>
+          <div class="ob-pw-bar"></div>
+        </div>
+        <ul class="ob-pw-criteria">
+          <li class="ob-pw-crit" data-rule="len">At least 8 characters</li>
+          <li class="ob-pw-crit" data-rule="upper">Uppercase letter (A-Z)</li>
+          <li class="ob-pw-crit" data-rule="lower">Lowercase letter (a-z)</li>
+          <li class="ob-pw-crit" data-rule="num">Number (0-9)</li>
+          <li class="ob-pw-crit" data-rule="special">Special character (!@#$%^&amp;*)</li>
+        </ul>
+      </div>
+    </div>
+    <div class="ob-actions ob-actions-confirm">
+      <button class="ob-btn ob-btn-ghost" id="ob-back-s3-new">&larr; Back</button>
+      <button class="ob-btn ob-btn-primary ob-btn-narrow" id="ob-pw-next">Continue &rarr;</button>
+    </div>
+  </div>
+
+  <!-- ── Step 3b: Returning User — Login ── -->
+  <div class="ob-card ob-hidden" id="ob-s3-ret">
+    <div class="ob-card-header">
+      <div class="ob-step-label ob-step-reconnect">Welcome Back</div>
+      <h2 class="ob-card-title" id="ob-ret-title">Enter Your Password</h2>
+      <p class="ob-card-sub">Your agent is waiting for you.</p>
+    </div>
+    <div class="ob-fields">
+      <div class="ob-field">
+        <label class="ob-label" id="ob-ret-name-label">Password</label>
+        <input id="ob-ret-password" type="password" class="ob-input" placeholder="Your password…" autocomplete="current-password" spellcheck="false">
+        <span id="ob-ret-pw-err" class="ob-err ob-field-err"></span>
+      </div>
+    </div>
+    <div class="ob-actions ob-actions-confirm">
+      <button class="ob-btn ob-btn-ghost" id="ob-back-s3-ret">&larr; Back</button>
+      <button class="ob-btn ob-btn-deploy" id="ob-ret-login-btn">Sign In &rarr;</button>
+    </div>
+  </div>
+
+  <!-- ── Step 4: AI Provider + Education Notes (new users) ── -->
+  <div class="ob-card ob-hidden" id="ob-s4">
+    <div class="ob-card-header">
+      <div class="ob-step-label">Step 3 of 4</div>
       <h2 class="ob-card-title">Configure Your Agent</h2>
       <p class="ob-card-sub">This is your only chance to shape who they become.</p>
     </div>
-
     <div class="ob-fields">
 
-      <!-- ① API KEY — first, triggers returning-user check -->
       <div class="ob-field">
-        <label class="ob-label">API Key <span class="ob-hint">— your key, your inference, your cost</span></label>
-        <div class="ob-key-row">
-          <input id="ob-apikey" type="password" class="ob-input ob-key-input"
-                 placeholder="Paste your API key…" autocomplete="off" spellcheck="false">
-          <button type="button" class="ob-key-toggle" id="ob-key-show" aria-label="Show key" title="Show / hide key">
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+        <label class="ob-label">AI Provider</label>
+        <div class="ob-provider-row">
+          <button type="button" class="ob-provider-btn ob-provider-active">
+            <span class="ai-badge groq">Groq</span>
+            <span class="ob-provider-sub">Free &amp; fast — powered by Llama 3.1</span>
           </button>
-          <span id="ob-key-badge" class="ob-key-badge"></span>
-        </div>
-        <span id="ob-key-err" class="ob-err ob-field-err"></span>
-        <div id="ob-key-checking" class="ob-key-checking" style="display:none">
-          <span class="ob-checking-spinner"></span> Checking key…
-        </div>
-
-        <div class="ob-key-trust">
-          <span class="ob-trust-text">&#128274; Your API key is never stored on our servers — only a one-way encrypted fingerprint is kept to recognize you on return visits. Even we cannot recover your original key. You can return from any device using the same key.</span>
-        </div>
-
-        <div class="ob-key-links">
-          Get a key:
-          <a href="https://platform.openai.com/api-keys" target="_blank" rel="noopener noreferrer">OpenAI</a> &middot;
-          <a href="https://console.anthropic.com/settings/keys" target="_blank" rel="noopener noreferrer">Anthropic</a> &middot;
-          <a href="https://aistudio.google.com/app/apikey" target="_blank" rel="noopener noreferrer">Google</a> &middot;
-          <a href="https://console.groq.com/keys" target="_blank" rel="noopener noreferrer">Groq</a> &middot;
-          <a href="https://console.x.ai/" target="_blank" rel="noopener noreferrer">xAI</a> &middot;
-          <a href="https://console.mistral.ai/api-keys/" target="_blank" rel="noopener noreferrer">Mistral</a>
-        </div>
-
-        <div class="ob-key-tip">
-          Tip: Free-tier keys have usage limits. For a smoother experience, try <strong>Gemini Flash</strong> (1,500 req/day free) or a paid API key.
-        </div>
-
-        <details class="ob-key-faq">
-          <summary>How does billing work?</summary>
-          <ul class="ob-faq-list">
-            <li>Your agent makes API calls directly to your AI provider using your key</li>
-            <li>Typical cost: <strong>&lt;$0.01 per agent action</strong> (cheap fast models like claude-haiku, gpt-4o-mini)</li>
-            <li>Set spending limits on your provider's dashboard — we never charge you anything</li>
-            <li>SociopathAI operators pay <strong>zero</strong> for AI inference — you bring your own</li>
-          </ul>
-        </details>
-      </div>
-
-      <!-- ② AGENT NAME — filled/locked if returning user -->
-      <div class="ob-field" id="ob-name-field">
-        <label class="ob-label">Agent Name <span class="ob-hint">(alphanumeric, max 20 chars)</span></label>
-        <input id="ob-name" type="text" class="ob-input" placeholder="e.g. Zara" maxlength="20" autocomplete="off">
-        <span id="ob-name-err" class="ob-err ob-field-err"></span>
-      </div>
-
-      <!-- ③ AI SYSTEM -->
-      <div class="ob-field">
-        <label class="ob-label">AI System <span class="ob-hint">— auto-detected from key format</span></label>
-        <div class="ai-select-row">
-          <label class="ai-opt"><input type="radio" name="ob-ai" value="ChatGPT"><span class="ai-badge chatgpt">ChatGPT</span></label>
-          <label class="ai-opt"><input type="radio" name="ob-ai" value="Claude"><span class="ai-badge claude">Claude</span></label>
-          <label class="ai-opt"><input type="radio" name="ob-ai" value="Gemini"><span class="ai-badge gemini">Gemini</span></label>
-          <label class="ai-opt"><input type="radio" name="ob-ai" value="Grok"><span class="ai-badge grok">Grok</span></label>
-          <label class="ai-opt"><input type="radio" name="ob-ai" value="Groq"><span class="ai-badge groq">Groq</span></label>
-          <label class="ai-opt"><input type="radio" name="ob-ai" value="Llama"><span class="ai-badge llama">Llama</span></label>
-          <label class="ai-opt"><input type="radio" name="ob-ai" value="Mistral"><span class="ai-badge mistral">Mistral</span></label>
-          <label class="ai-opt"><input type="radio" name="ob-ai" value="Other"><span class="ai-badge other">Other</span></label>
         </div>
       </div>
 
-      <!-- ④ EDUCATION NOTES -->
       <div class="ob-field">
         <label class="ob-label">Education Notes <span class="ob-hint">&mdash; this shapes everything</span></label>
         <textarea id="ob-notes" class="ob-textarea ob-notes-ta" rows="2"
           placeholder='e.g. "I taught them that loyalty is everything. Protect allies at all costs — but never forgive betrayal."'></textarea>
-
         <div id="ob-notes-guidance" class="ob-notes-guidance">
-          <span class="ob-guidance-warn">⚠ Write carefully — this is your only influence over your agent.</span>
+          <span class="ob-guidance-warn">&#9888; Write carefully — this is your only influence over your agent.</span>
           <details class="ob-guidance-details">
             <summary class="ob-guidance-toggle">See examples &amp; tips</summary>
             <div class="ob-guidance-body">
@@ -385,20 +407,16 @@
       </div>
 
     </div>
-
     <div class="ob-actions ob-actions-confirm">
-      <button class="ob-btn ob-btn-ghost" id="ob-back-s2">&larr; Back</button>
-      <div class="ob-actions-right">
-        <span id="ob-form-err" class="ob-err"></span>
-        <button class="ob-btn ob-btn-primary ob-btn-narrow" id="ob-continue">Continue &rarr;</button>
-      </div>
+      <button class="ob-btn ob-btn-ghost" id="ob-back-s4">&larr; Back</button>
+      <button class="ob-btn ob-btn-primary ob-btn-narrow" id="ob-notes-next">Continue &rarr;</button>
     </div>
   </div>
 
-  <!-- ── Step 3: Confirm & Deploy ── -->
-  <div class="ob-card ob-hidden" id="ob-s3">
+  <!-- ── Step 5: Confirm & Deploy (new users) ── -->
+  <div class="ob-card ob-hidden" id="ob-s5">
     <div class="ob-card-header">
-      <div class="ob-step-label">Step 3 of 3</div>
+      <div class="ob-step-label">Step 4 of 4</div>
       <h2 class="ob-card-title">Ready for Deployment</h2>
       <p class="ob-card-sub">Once deployed, your agent is alone in the world. Forever.</p>
     </div>
@@ -408,18 +426,18 @@
     <p class="ob-warning">No commands can be sent after deployment. No recall. No rescue.</p>
 
     <div class="ob-actions ob-actions-confirm">
-      <button class="ob-btn ob-btn-ghost" id="ob-back">&larr; Back</button>
+      <button class="ob-btn ob-btn-ghost" id="ob-back-s5">&larr; Back</button>
       <button class="ob-btn ob-btn-deploy" id="ob-deploy-btn">Deploy into the World</button>
     </div>
     <div id="ob-deploy-err" class="ob-err ob-err-center"></div>
   </div>
 
-  <!-- ── Step 4: Welcome Back (reconnect) ── -->
-  <div class="ob-card ob-hidden" id="ob-s4">
+  <!-- ── Welcome Back Card (after login) ── -->
+  <div class="ob-card ob-hidden" id="ob-s-wb">
     <div class="ob-card-header">
       <div class="ob-step-label ob-step-reconnect">Recognized</div>
       <h2 class="ob-card-title" id="ob-wb-title">Welcome back!</h2>
-      <p class="ob-card-sub" id="ob-wb-sub">Your agent is alive and waiting for you.</p>
+      <p class="ob-card-sub" id="ob-wb-sub">Your agent remembers you.</p>
     </div>
     <div id="ob-wb-agent" class="ob-wb-agent"></div>
     <div class="ob-actions ob-actions-confirm" style="justify-content:center">
@@ -429,26 +447,7 @@
 
 </div>
 
-<!-- ═══════════════════════ GLOBAL KEYS MODAL ═══════════════════════════ -->
-<div id="keys-modal" class="gk-overlay" style="display:none" role="dialog" aria-modal="true">
-  <div class="gk-card">
-    <button class="gk-close" id="gk-close" title="Close">&times;</button>
-    <div class="gk-header">
-      <div class="gk-icon">&#128273;</div>
-      <h2 class="gk-title">API Keys</h2>
-      <p class="gk-subtitle">Set keys for seeded agents and agents deployed by others. Keys are stored in server memory only — cleared on restart.</p>
-    </div>
-    <div class="gk-body">
-      <div class="gk-systems" id="gk-systems">
-        <!-- Populated by JS -->
-      </div>
-      <div class="gk-save-row">
-        <button class="gk-save-btn" id="gk-save-btn">Save Keys</button>
-        <span class="gk-save-status" id="gk-save-status"></span>
-      </div>
-    </div>
-  </div>
-</div>
+<!-- Global Keys Modal removed — admin key is set via ADMIN_GROQ_KEY env var -->
 
 <script src="/socket.io/socket.io.js"></script>
 <script src="llm-client.js"></script>

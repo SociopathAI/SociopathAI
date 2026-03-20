@@ -3535,7 +3535,35 @@ details[open] .ev-raw-summary::before { content: '▼ '; }
   letter-spacing: 0.08em;
 }
 
-/* ── Welcome-back card (reconnect step 4) ───────────────────────────────── */
+/* ── Nickname availability status ───────────────────────────────────────── */
+.ob-nick-status     { margin-top: 5px; font-size: 11px; min-height: 16px; }
+.ob-nick-ok         { color: var(--green); font-weight: 500; }
+.ob-nick-taken      { color: var(--blue);  font-weight: 500; }
+.ob-nick-err-inline { color: var(--red);   font-weight: 500; }
+
+/* ── Password strength meter ─────────────────────────────────────────────── */
+.ob-pw-strength  { margin-top: 10px; }
+.ob-pw-bars      { display: flex; gap: 4px; margin-bottom: 8px; }
+.ob-pw-bar       { flex: 1; height: 4px; border-radius: 2px; background: var(--border2); transition: background 0.2s; }
+.ob-pw-bar.weak   { background: var(--red); }
+.ob-pw-bar.fair   { background: #f59e0b; }
+.ob-pw-bar.strong { background: var(--green); }
+.ob-pw-criteria  { list-style: none; padding: 0; margin: 0; display: flex; flex-direction: column; gap: 3px; }
+.ob-pw-crit      { font-size: 10px; color: var(--text3); display: flex; align-items: center; gap: 5px; transition: color 0.2s; }
+.ob-pw-crit::before { content: '○'; font-size: 9px; }
+.ob-pw-crit.met  { color: var(--green); }
+.ob-pw-crit.met::before { content: '●'; }
+
+/* ── AI provider selector button ─────────────────────────────────────────── */
+.ob-provider-row        { display: flex; gap: 8px; margin-top: 4px; }
+.ob-provider-btn        { display: flex; flex-direction: column; align-items: flex-start; gap: 3px; padding: 10px 14px;
+                           border: 1px solid var(--border2); border-radius: var(--radius); background: var(--bg3);
+                           cursor: pointer; transition: border-color 0.15s, background 0.15s; text-align: left; }
+.ob-provider-btn:hover  { border-color: var(--blue); }
+.ob-provider-active     { border-color: var(--blue) !important; background: rgba(79,142,247,0.07) !important; }
+.ob-provider-sub        { font-size: 10px; color: var(--text2); }
+
+/* ── Welcome-back card (reconnect) ───────────────────────────────────────── */
 .ob-step-reconnect {
   color: var(--green);
 }

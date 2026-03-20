@@ -6,6 +6,7 @@ const http = require('http');
 const { Server } = require('socket.io');
 const path = require('path');
 const fs = require('fs');
+const crypto = require('crypto');
 const Simulation = require('./src/Simulation');
 const LLMBridge = require('./src/LLMBridge');
 const PersistenceManager = require('./src/PersistenceManager');
@@ -154,6 +155,43 @@ const sim = new Simulation(io);
 // Track used agent names (case-insensitive)
 const usedNames = new Set();
 
+// ── Auth Utilities ─────────────────────────────────────────────────────────────
+const SESSION_EXPIRY_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
+const LOCKOUT_ATTEMPTS  = 5;
+const LOCKOUT_MS        = 30 * 60 * 1000;            // 30 minutes
+
+const _sessions = new Map(); // tokenHash → { agentId, expires }
+
+function _sha256(s)  { return crypto.createHash('sha256').update(s).digest('hex'); }
+function _randHex(n) { return crypto.randomBytes(n).toString('hex'); }
+function _hashPw(pw, salt) { return _sha256(salt + pw); }
+
+function _validatePassword(pw) {
+  if (!pw || pw.length < 8)   return 'Password must be at least 8 characters';
+  if (!/[A-Z]/.test(pw))      return 'Must contain at least 1 uppercase letter';
+  if (!/[a-z]/.test(pw))      return 'Must contain at least 1 lowercase letter';
+  if (!/[0-9]/.test(pw))      return 'Must contain at least 1 number';
+  if (!/[!@#$%^&*]/.test(pw)) return 'Must contain at least 1 special character (!@#$%^&*)';
+  return null;
+}
+
+function _createSession(agentId) {
+  const token   = _randHex(32); // 64-char hex
+  const hash    = _sha256(token);
+  const expires = Date.now() + SESSION_EXPIRY_MS;
+  _sessions.set(hash, { agentId, expires });
+  return { token, hash, expires };
+}
+
+function _verifySession(token) {
+  if (!token) return null;
+  const hash    = _sha256(token);
+  const session = _sessions.get(hash);
+  if (!session) return null;
+  if (Date.now() > session.expires) { _sessions.delete(hash); return null; }
+  return session.agentId;
+}
+
 // ── Async startup ─────────────────────────────────────────────────────────────
 (async () => {
   // Step 0: Init DB (creates PG pool + tables, or logs JSON fallback)
@@ -206,6 +244,16 @@ const usedNames = new Set();
       eventsData:        _saved.eventsData,
     });
     for (const n of restoredNames) usedNames.add(n);
+
+    // Rebuild in-memory session map from restored agents
+    for (const a of sim.agents) {
+      if (a.sessionToken && a.sessionExpires && Date.now() < a.sessionExpires) {
+        _sessions.set(a.sessionToken, { agentId: a.id, expires: a.sessionExpires });
+      }
+      // Re-attach admin key for Groq agents
+      const adminKey = process.env.ADMIN_GROQ_KEY;
+      if (adminKey && a.aiSystem === 'Groq' && !a.apiKey) a.apiKey = adminKey;
+    }
 
     console.log(`LOADED: ${_preCounts.agents} agents, ${_preCounts.conversations} conversations, ${_preCounts.events} events, ${_preCounts.objects} objects`);
 
@@ -395,6 +443,124 @@ app.post('/api/llm-proxy', async (req, res) => {
   }
 });
 
+// GET /api/check-nickname — real-time availability check
+app.get('/api/check-nickname', (req, res) => {
+  const name = (req.query.name || '').trim();
+  const err  = validateAgentName(name);
+  if (err) return res.json({ available: false, error: err });
+  res.json({ available: !usedNames.has(name.toLowerCase()) });
+});
+
+// POST /api/register — create new agent with nickname + password
+app.post('/api/register', (req, res) => {
+  const { nickname, password, notes } = req.body;
+
+  const nameErr = validateAgentName(nickname);
+  if (nameErr) return res.status(400).json({ error: nameErr });
+  const name = nickname.trim();
+
+  if (usedNames.has(name.toLowerCase()))
+    return res.status(400).json({ error: `Name "${name}" is already taken` });
+
+  const pwErr = _validatePassword(password);
+  if (pwErr) return res.status(400).json({ error: pwErr });
+
+  const adminKey = process.env.ADMIN_GROQ_KEY;
+  if (!adminKey) return res.status(503).json({ error: 'Service temporarily unavailable' });
+
+  const salt  = _randHex(16);
+  const hash  = _hashPw(password, salt);
+
+  usedNames.add(name.toLowerCase());
+  const agent = sim.addAgent(name, { aiSystem: 'Groq', notes: notes || '', apiKey: adminKey });
+
+  agent.passwordHash  = hash;
+  agent.passwordSalt  = salt;
+  agent.loginAttempts = 0;
+  agent.lockedUntil   = 0;
+
+  const sess = _createSession(agent.id);
+  agent.sessionToken   = sess.hash;
+  agent.sessionExpires = sess.expires;
+
+  res.json({ success: true, token: sess.token, agent: agent.getSummary() });
+});
+
+// POST /api/login — authenticate returning user
+app.post('/api/login', (req, res) => {
+  const { nickname, password } = req.body;
+  if (!nickname || !password) return res.status(400).json({ error: 'Nickname and password required' });
+
+  const agent = sim.agents.find(a => a.name.toLowerCase() === nickname.trim().toLowerCase());
+  if (!agent) return res.status(401).json({ error: 'Invalid nickname or password' });
+
+  if (agent.lockedUntil && Date.now() < agent.lockedUntil) {
+    const mins = Math.ceil((agent.lockedUntil - Date.now()) / 60000);
+    return res.status(429).json({ error: `Too many attempts. Try again in ${mins} minute${mins !== 1 ? 's' : ''}.` });
+  }
+
+  if (!agent.passwordHash || !agent.passwordSalt)
+    return res.status(401).json({ error: 'Invalid nickname or password' });
+
+  const attempt = _hashPw(password, agent.passwordSalt);
+  if (attempt !== agent.passwordHash) {
+    agent.loginAttempts = (agent.loginAttempts || 0) + 1;
+    if (agent.loginAttempts >= LOCKOUT_ATTEMPTS) {
+      agent.lockedUntil   = Date.now() + LOCKOUT_MS;
+      agent.loginAttempts = 0;
+      return res.status(429).json({ error: 'Too many attempts. Try again in 30 minutes.' });
+    }
+    return res.status(401).json({ error: 'Invalid nickname or password' });
+  }
+
+  // Success — reset counters
+  agent.loginAttempts = 0;
+  agent.lockedUntil   = 0;
+
+  // Invalidate old session token hash
+  if (agent.sessionToken) _sessions.delete(agent.sessionToken);
+
+  // Re-attach admin key
+  const adminKey = process.env.ADMIN_GROQ_KEY;
+  if (adminKey) agent.apiKey = adminKey;
+
+  // Revive dead agent or wake dormant one
+  if (!agent.alive) {
+    agent.alive = true; agent.energy = 100; agent.food = 50; agent.material = 50;
+    agent.deathCause = null; agent.deathContext = null; agent.deathTs = null;
+    agent.dyingPromptSent = false; agent.deployedAt = Date.now();
+    agent._addLog('[REVIVED] Returned to the world.');
+    sim._log({ type: 'join', msg: `✨ ${agent.name} has returned to the world`, agentId: agent.id });
+  } else if (agent.dormant) {
+    sim.wakeAgent(agent, agent.apiKey);
+  }
+
+  const sess = _createSession(agent.id);
+  agent.sessionToken   = sess.hash;
+  agent.sessionExpires = sess.expires;
+
+  res.json({
+    success: true,
+    token:   sess.token,
+    agent:   { ...agent.getSummary(), educationNotes: agent.educationNotes || '' },
+  });
+});
+
+// POST /api/logout — invalidate session
+app.post('/api/logout', (req, res) => {
+  const { token } = req.body;
+  if (token) {
+    const agentId = _verifySession(token);
+    if (agentId) {
+      const agent = sim.agents.find(a => a.id === agentId);
+      if (agent) { agent.sessionToken = null; agent.sessionExpires = null; }
+    }
+    _sessions.delete(_sha256(token));
+  }
+  res.json({ success: true });
+});
+
+// Legacy agent deploy — admin/seeded agents only, uses ADMIN_GROQ_KEY
 app.post('/api/agent', (req, res) => {
   const { name, aiSystem, education } = req.body;
 
@@ -406,89 +572,55 @@ app.post('/api/agent', (req, res) => {
     return res.status(400).json({ error: `Name "${trimmedName}" is already taken` });
   }
 
-  // AI system: body value → header auto-detect → Other
   let sys = VALID_AI_SYSTEMS.includes(aiSystem) ? aiSystem : null;
   if (!sys) sys = detectAiSystem(req) || 'Other';
 
-  // API key: extracted from education, stored in-memory on agent only
-  // Never logged, never persisted, never echoed back in responses
-  const apiKey = typeof education?.apiKey === 'string' && education.apiKey.trim()
-    ? education.apiKey.trim()
-    : null;
+  // Use ADMIN_GROQ_KEY for Groq, otherwise fall back to education.apiKey for admin use
+  const adminKey = process.env.ADMIN_GROQ_KEY;
+  const apiKey = adminKey || (typeof education?.apiKey === 'string' ? education.apiKey.trim() : null);
 
   usedNames.add(trimmedName.toLowerCase());
   const agentEdu = { ...(education || {}), aiSystem: sys };
   if (apiKey) agentEdu.apiKey = apiKey;
   const agent = sim.addAgent(trimmedName, agentEdu);
 
-  // Store key fingerprint on agent (for reconnect identification after server restart)
-  if (apiKey) {
-    const { salt, hash } = PersistenceManager.hashKey(apiKey);
-    agent.keySalt = salt;
-    agent.keyHash = hash;
-  }
-
-  // Agent timer is started by addAgent() — nothing to do here
-
   res.json({ success: true, agent: agent.getSummary() });
 });
 
 
-// Reconnect: verify key fingerprint and re-register key in memory
-// This allows returning users (even after server restart) to resume LLM decisions
+// Reconnect: verify session token, re-attach admin key, wake agent
 app.post('/api/agent/reconnect', (req, res) => {
-  const { apiKey } = req.body;
-  if (typeof apiKey !== 'string' || !apiKey.trim()) {
-    return res.status(400).json({ found: false, error: 'Missing key' });
-  }
+  const { token } = req.body;
+  if (!token) return res.status(400).json({ found: false, error: 'Missing token' });
 
-  const trimmedKey = apiKey.trim();
-  const keyTail    = trimmedKey.slice(-6); // last 6 chars for safe identification in logs
+  const agentId = _verifySession(token);
+  if (!agentId) return res.json({ found: false });
 
-  const searchPool = sim.agents;
-  const agent = PersistenceManager.findAgentByKey(trimmedKey, searchPool);
+  const agent = sim.agents.find(a => a.id === agentId);
+  if (!agent) return res.json({ found: false });
 
-  if (!agent) {
-    console.log(`[Reconnect] Key ...${keyTail} — NO MATCH found among ${searchPool.length} agent(s). Will create new agent.`);
-    return res.json({ found: false });
-  }
-
-  console.log(`[Reconnect] Key ...${keyTail} — MATCHED agent "${agent.name}" (id=${agent.id}, alive=${agent.alive}, dormant=${agent.dormant}, aiSystem=${agent.aiSystem})`);
-
-  // Re-register the raw key in memory so this agent gets LLM decisions again
-  agent.apiKey = trimmedKey;
+  // Re-attach admin key on reconnect (survives server restarts)
+  const adminKey = process.env.ADMIN_GROQ_KEY;
+  if (adminKey) agent.apiKey = adminKey;
 
   let revived = false;
   if (!agent.alive) {
-    // Revive dead agent: restore vitals, keep identity/history/badges
-    agent.alive        = true;
-    agent.energy       = 100;
-    agent.food         = 50;
-    agent.material     = 50;
-    agent.deathCause   = null;
-    agent.deathContext = null;
-    agent.deathTs      = null;
-    agent.dyingPromptSent = false;
-    agent.deployedAt   = Date.now();   // reset age for new life
-    agent._addLog(`[REVIVED] Returned to the world.`);
+    agent.alive = true; agent.energy = 100; agent.food = 50; agent.material = 50;
+    agent.deathCause = null; agent.deathContext = null; agent.deathTs = null;
+    agent.dyingPromptSent = false; agent.deployedAt = Date.now();
+    agent._addLog('[REVIVED] Returned to the world.');
     sim._log({ type: 'join', msg: `✨ ${agent.name} has returned to the world`, agentId: agent.id });
     revived = true;
     console.log(`[Reconnect] Revived dead agent "${agent.name}"`);
   } else if (agent.dormant) {
-    // Wake dormant agent — socket 'identify' will also do this, but cover the REST path too
-    sim.wakeAgent(agent, trimmedKey);
+    sim.wakeAgent(agent, agent.apiKey);
+    console.log(`[Reconnect] Woke dormant agent "${agent.name}"`);
   }
-
-  // wakeAgent() starts the per-agent timer — nothing extra needed
 
   res.json({
     found:   true,
     revived,
-    wasdormant: !revived && !agent.dormant && !!agent.dormantSince,
-    message: revived
-      ? `${agent.name} has been revived! They return with energy renewed.`
-      : `Welcome back, ${agent.name}! Your agent is alive and waiting for you.`,
-    agent:   { ...agent.getSummary(), hasLLM: true, educationNotes: agent.educationNotes || '' },
+    agent:   { ...agent.getSummary(), educationNotes: agent.educationNotes || '' },
   });
 });
 
