@@ -145,6 +145,27 @@ const io = new Server(httpServer, {
 
 app.use(express.json());
 
+// ── Security Headers ────────────────────────────────────────────────────────
+app.use((req, res, next) => {
+  res.setHeader(
+    'Content-Security-Policy',
+    [
+      "default-src 'self'",
+      "script-src 'self' 'unsafe-inline' 'unsafe-eval'",
+      "style-src 'self' 'unsafe-inline'",
+      "img-src 'self' data:",
+      "connect-src 'self' ws: wss:",
+      "font-src 'self'",
+      "object-src 'none'",
+      "base-uri 'self'",
+    ].join('; ')
+  );
+  next();
+});
+
+// Suppress favicon 404s
+app.get('/favicon.ico', (req, res) => res.status(204).end());
+
 // Route / → landing page, /app → simulation app
 app.get('/', (req, res) => res.sendFile(path.join(__dirname, 'public', 'landing.html')));
 app.get('/app', (req, res) => res.sendFile(path.join(__dirname, 'public', 'index.html')));
