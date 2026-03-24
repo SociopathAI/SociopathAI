@@ -811,6 +811,60 @@ async function _directCall(apiKey, profile, label, system, user, maxTokens, time
   return null;
 }
 
+// ─── Groq → OpenRouter automatic fallback ─────────────────────────────────────
+
+const GROQ_FALLBACK_MODEL  = 'meta-llama/llama-3.3-70b-instruct:free';
+const GROQ_RECOVERY_MS     = 60_000;  // probe Groq again after 60s
+const OR_FALLBACK_RETRY_MS = 30_000;  // if OpenRouter also fails, wait 30s then retry
+
+const _groqFallback = { active: false }; // true while Groq is rate-limited
+
+/** Route a single call through the admin OpenRouter key as a Groq fallback. */
+async function _groqOrFallback(orKey, system, user, maxTokens, timeoutMs, label, bypassQueue) {
+  const orProfile = {
+    name: 'OpenRouter', type: 'oai',
+    base: 'https://openrouter.ai/api',
+    models: [GROQ_FALLBACK_MODEL],
+    openrouter: true,
+  };
+  if (bypassQueue) {
+    return _directCall(orKey, orProfile, label, system, user, maxTokens, timeoutMs);
+  }
+  return _enqueueCall(orKey, 'OpenRouter', async () => {
+    const r = await _singleCall(orKey, orProfile, GROQ_FALLBACK_MODEL, system, user, maxTokens, timeoutMs, {});
+    if (r === _RATE_LIMITED || r === null) {
+      console.log(`[FALLBACK] OpenRouter also limited — waiting ${OR_FALLBACK_RETRY_MS / 1000}s then retrying`);
+      await new Promise(res => setTimeout(res, OR_FALLBACK_RETRY_MS));
+      return _singleCall(orKey, orProfile, GROQ_FALLBACK_MODEL, system, user, maxTokens, timeoutMs, {});
+    }
+    return r;
+  }, label);
+}
+
+/** Activate Groq fallback, schedule 60s recovery probe, then call OpenRouter. */
+async function _activateGroqFallback(groqApiKey, system, user, maxTokens, timeoutMs, label, bypassQueue) {
+  const orKey = process.env.ADMIN_OPENROUTER_KEY;
+  if (!orKey) return _RATE_LIMITED; // no OR key configured — surface the 429 normally
+
+  _groqFallback.active = true;
+  console.log('[FALLBACK] Groq rate limited, switching to OpenRouter');
+
+  // After 60s: probe Groq once; deactivate fallback only on confirmed success
+  setTimeout(async () => {
+    const groqProfile = { name: 'Groq', ...PROVIDER_PROFILES['Groq'] };
+    const probe = await _singleCall(groqApiKey, groqProfile, 'llama-3.3-70b-versatile',
+      'You are a helpful assistant.', 'Say "ok".', 5, 8000, {});
+    if (probe !== null && probe !== _RATE_LIMITED && probe !== _AUTH_ERROR && probe !== _MODEL_NOT_FOUND) {
+      _groqFallback.active = false;
+      console.log('[RECOVERY] Groq available again');
+    } else {
+      console.log('[FALLBACK] Groq still rate limited — staying on OpenRouter');
+    }
+  }, GROQ_RECOVERY_MS);
+
+  return _groqOrFallback(orKey, system, user, maxTokens, timeoutMs, label, bypassQueue);
+}
+
 // ─── Raw call: resolves provider then enqueues via per-key traffic controller ──
 // bypassQueue=true skips serialization — for one-shot cosmetic calls (form design, spawn status)
 // that must not block agent decision cycles.
@@ -822,14 +876,26 @@ async function _rawCall(apiKey, aiSystem, system, user, maxTokens, timeoutMs, ag
     return null;
   }
 
+  const isGroq = profile.name === 'Groq' || profile.name === 'Llama';
+
+  // ── Groq fallback: if Groq is currently rate-limited, route straight to OpenRouter ──
+  if (isGroq && _groqFallback.active) {
+    const orKey = process.env.ADMIN_OPENROUTER_KEY;
+    if (orKey) return _groqOrFallback(orKey, system, user, maxTokens, timeoutMs, agentName || aiSystem, bypassQueue);
+  }
+
   // Cosmetic / one-shot calls bypass the queue entirely — run directly with no cooldown wait
   if (bypassQueue) {
-    return _directCall(apiKey, profile, agentName || aiSystem, system, user, maxTokens, timeoutMs);
+    const r = await _directCall(apiKey, profile, agentName || aiSystem, system, user, maxTokens, timeoutMs);
+    if (isGroq && r === _RATE_LIMITED && !_groqFallback.active) {
+      return _activateGroqFallback(apiKey, system, user, maxTokens, timeoutMs, agentName || aiSystem, bypassQueue);
+    }
+    return r;
   }
 
   // Enqueue: only ONE decision call per API-key-hash runs at a time; queue state (q) passed in
   const label = agentName || aiSystem;
-  return _enqueueCall(apiKey, profile.name, async (q) => {
+  const r = await _enqueueCall(apiKey, profile.name, async (q) => {
 
     // Build ordered model list — exclude session-banned and currently-cooling models
     const notCooled    = m => !_excludedModels.has(m) && !_isCooldown(profile.name, m);
@@ -911,6 +977,11 @@ async function _rawCall(apiKey, aiSystem, system, user, maxTokens, timeoutMs, ag
     if (anyServerError) return _SERVER_ERROR;
     return null;
   });
+
+  if (isGroq && r === _RATE_LIMITED && !_groqFallback.active) {
+    return _activateGroqFallback(apiKey, system, user, maxTokens, timeoutMs, label, bypassQueue);
+  }
+  return r;
 }
 
 // ─── JSON extraction ───────────────────────────────────────────────────────────
