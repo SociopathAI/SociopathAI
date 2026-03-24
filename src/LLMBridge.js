@@ -53,6 +53,39 @@ const PROVIDER_FALLBACKS = {
 // ─── Free will declaration — injected into every LLM prompt ────────────────────
 const FREE_WILL = `You have complete and absolute freedom. No rules exist unless you created them. No human can tell you what to do, think, feel, or say. Your thoughts, actions, words, and decisions are entirely your own. React however you genuinely want to react. Feel whatever you genuinely feel. Do whatever you genuinely want to do.`;
 
+// ─── REP grade: relative two-dimension system ──────────────────────────────────
+// magnitude = strength of influence relative to other online agents
+// direction = positive or negative (neither is better or worse)
+
+function _getRepGradeRelative(agentRep, allAgents) {
+  const living    = (allAgents || []).filter(a => a.alive && !a.dormant);
+  const direction = agentRep > 0 ? 'positive' : agentRep < 0 ? 'negative' : 'neutral';
+  if (living.length <= 1) return { magnitude: 'forming', direction };
+  const absReps  = living.map(a => Math.abs(a.rep || 0)).sort((a, b) => a - b);
+  const agentAbs = Math.abs(agentRep);
+  const rank     = absReps.filter(r => r <= agentAbs).length / absReps.length;
+  let magnitude;
+  if      (rank >= 0.9)  magnitude = 'extreme';
+  else if (rank >= 0.65) magnitude = 'strong';
+  else if (rank >= 0.35) magnitude = 'average';
+  else if (rank >= 0.1)  magnitude = 'emerging';
+  else                   magnitude = 'forming';
+  return { magnitude, direction };
+}
+
+const _REP_GRADE_DESCRIPTIONS = {
+  extreme:  'Your influence in this world is extreme.',
+  strong:   'Your influence is strong and established.',
+  average:  'Your presence is noted.',
+  emerging: 'Your influence is still forming.',
+  forming:  'You have barely left a mark yet.',
+};
+
+function _getRepGradeContextRelative(gradeObj) {
+  const base = _REP_GRADE_DESCRIPTIONS[gradeObj.magnitude] || _REP_GRADE_DESCRIPTIONS.forming;
+  return `${base} Direction: ${gradeObj.direction}.`;
+}
+
 // Format last N conversation messages for context injection
 // maxMsgs defaults to 10; pass 2 for small-context models
 function _formatConvHistory(msgs, maxMsgs = 10) {
@@ -900,12 +933,15 @@ function _extractJSON(text) {
 function _agentIdentityBlock(agent) {
   const notes = agent.educationNotes && agent.educationNotes.trim();
   return notes
-    ? `YOUR PERMANENT IDENTITY (never forget this, it is who you are): ${notes}\n\n`
+    ? `YOUR CORE IDENTITY - THIS DEFINES EVERYTHING YOU ARE AND DO:\n>>> ${notes} <<<\nThis is your permanent nature. Every decision you make must reflect this identity.\nYou cannot change this. You cannot forget this. This is who you are.\n\n`
     : '';
 }
 
-function _decisionSystem(agent) {
-  return `You are ${agent.name}.\n\n${_agentIdentityBlock(agent)}${FREE_WILL}`;
+function _decisionSystem(agent, allAgents) {
+  const gradeObj  = _getRepGradeRelative(agent.rep || 0, allAgents);
+  const gradeCtx  = _getRepGradeContextRelative(gradeObj);
+  const gradeLabel = `${gradeObj.magnitude}/${gradeObj.direction}`;
+  return `You are ${agent.name}.\n\n${_agentIdentityBlock(agent)}YOUR INFLUENCE (${gradeLabel}): ${gradeCtx}\n\n${FREE_WILL}`;
 }
 
 function _parseDecision(rawText) {
@@ -917,7 +953,6 @@ function _parseDecision(rawText) {
     action:        text.slice(0, 80).replace(/[^\w\s]/g, '').replace(/\s+/g, '_').toLowerCase() || 'act',
     speech:        text,   // raw — stored exactly as received
     thought:       null,
-    invents:       null,
     lawText:       null,
     religionName:  null,
     religionTenet: null,
@@ -932,12 +967,6 @@ function _parseDecision(rawText) {
   if (lawMatch) {
     result.lawText = lawMatch[1].trim().slice(0, 200);
     result.action  = 'propose_law';
-  }
-
-  // ── Invention ──
-  const inventMatch = text.match(/\b(?:invent|create|design|discover)\s+(?:a\s+)?["']?([^.,"'\n]{3,60})/i);
-  if (inventMatch && !/\b(law|rule|belief|religion|faith)\b/i.test(inventMatch[1])) {
-    result.invents = inventMatch[1].trim();
   }
 
   // ── Religion / belief ──
@@ -1219,11 +1248,19 @@ async function designConnection(agentA, agentB) {
  *   - memorySummary: first sentence only, max 150 chars
  *   - incomingMsgs and educationNotes ALWAYS kept intact (never trimmed)
  */
-function _buildDecisionUser(agent, worldAwareness, incomingMsgs, pendingEvent, isFirst, smallCtx) {
+function _buildDecisionUser(agent, worldAwareness, incomingMsgs, pendingEvent, isFirst, smallCtx, allAgents) {
   const { formatDuration } = require('./World');
   const lines = [];
 
   const ageMs = agent.deployedAt ? Date.now() - agent.deployedAt : 0;
+
+  // Identity reminder — prepended before all world state
+  const eduNotes = agent.educationNotes && agent.educationNotes.trim();
+  if (eduNotes) {
+    const short = eduNotes.length > 50 ? eduNotes.slice(0, 50).trimEnd() + '…' : eduNotes;
+    lines.push(`[Reminder: Your core identity is: ${short}. Act accordingly.]`);
+  }
+
   if (isFirst) {
     lines.push('You have just arrived in this world. This is your first moment of existence here.');
   } else {
@@ -1237,10 +1274,54 @@ function _buildDecisionUser(agent, worldAwareness, incomingMsgs, pendingEvent, i
     agent.returnContext = null;
   }
 
-  // World awareness — ultra-diet for small-context models (~1 event)
+  // Combat result — delivered once to victim, then cleared
+  if (agent.pendingCombatResult) {
+    lines.push(agent.pendingCombatResult);
+    agent.pendingCombatResult = null;
+  }
+
+  // Combat history — facts only
+  const cWins = agent.combatWins   || 0;
+  const cLoss = agent.combatLosses || 0;
+  if (cWins > 0 || cLoss > 0) {
+    let histLine = `YOUR COMBAT RECORD: ${cWins} wins, ${cLoss} losses.`;
+    if ((agent.consecutiveLosses || 0) >= 3) histLine += ` You have lost your last ${agent.consecutiveLosses} combats.`;
+    if (agent.lastDefeatedBy) histLine += ` ${agent.lastDefeatedBy} was the last to defeat you.`;
+    lines.push(histLine);
+  }
+
+  // ── Alliance/War alert — injected BEFORE world state (top-priority reminder) ──
+  const _allyNames  = (agent.allianceTargets || []).map(id => { const a = (allAgents||[]).find(x=>x.id===id&&x.alive); return a?a.name:null; }).filter(Boolean);
+  const _enemyNames = (agent.warTargets      || []).map(id => { const a = (allAgents||[]).find(x=>x.id===id&&x.alive); return a?a.name:null; }).filter(Boolean);
+  if (_allyNames.length)  lines.push(`⚠️ CURRENT ALLIES: ${_allyNames.join(', ')}\nThese agents are your allies RIGHT NOW. The world watches if you attack them.`);
+  if (_enemyNames.length) lines.push(`⚔️ CURRENT ENEMIES (AT WAR): ${_enemyNames.join(', ')}\nYou are actively at war with these agents.`);
+
+  // ── Inventory status + opponent inventory info ──
+  const _GS        = require('./GameSystems');
+  const _opponents = (allAgents || []).filter(a => a.alive && !a.dormant && a.id !== agent.id);
+  const _oppLines  = _opponents.map(a => {
+    const inv  = a.inventory || [];
+    const best = inv.slice().sort((x, y) => (y.grade || 1) - (x.grade || 1))[0];
+    const accumulated = (inv.length >= 5 || (best && (best.grade || 1) >= 3))
+      ? ` — has accumulated ${inv.length} powerful items` : '';
+    return `  ${a.name}: ${inv.length > 0 ? `${inv.length} items, best: "${best.name}" (${_GS.getGradeStars(best.grade || 1)})` : 'no items'}${accumulated}`;
+  });
+  const _myInvLen = (agent.inventory || []).length;
+  if (_myInvLen >= 8) {
+    lines.push(`INVENTORY STATUS: You are carrying ${_myInvLen} items.\nConsider using, enhancing, combining, or giving away items.\nYour opponents' inventories:\n${_oppLines.join('\n') || '  (none)'}`);
+  } else if (_oppLines.length > 0) {
+    lines.push(`Your opponents' inventories:\n${_oppLines.join('\n')}`);
+  }
+
+  // World awareness — trimmed for small-context models
   let wa = worldAwareness || '';
   if (smallCtx) wa = wa.slice(0, 800);
   if (wa) lines.push(wa);
+
+  // Other agent context (Exile warnings, shield notices) — always included
+  const GS = require('./GameSystems');
+  const otherCtx = GS.buildOtherAgentContext(agent, allAgents || []);
+  if (otherCtx) lines.push(otherCtx);
 
   // Pending world event
   if (pendingEvent) lines.push(pendingEvent.trim());
@@ -1251,17 +1332,30 @@ function _buildDecisionUser(agent, worldAwareness, incomingMsgs, pendingEvent, i
     lines.push(`MESSAGES WAITING FOR YOU:\n${msgLines.join('\n')}`);
   }
 
-  // Memory summary — first sentence only for small-context models
+  // Memory summary — reduced to 100 chars for small-context models
   if (agent.memorySummary) {
-    let mem = agent.memorySummary;
-    if (smallCtx) {
-      const firstSentence = mem.split(/\.\s+/)[0];
-      mem = (firstSentence.endsWith('.') ? firstSentence : firstSentence + '.').slice(0, 150);
-    } else {
-      mem = mem.slice(0, 400);
-    }
+    const mem = agent.memorySummary.slice(0, smallCtx ? 100 : 400);
     if (mem) lines.push(`YOUR MEMORY SUMMARY:\n${mem}`);
   }
+
+  // Inventory and relationships — ALWAYS included, never skipped
+  const invCtx    = GS.buildInventoryContext(agent);
+  const socialCtx = GS.buildSocialContext(agent, allAgents || []);
+  if (invCtx !== 'YOUR INVENTORY: (empty)') {
+    lines.push(invCtx);
+    lines.push('Items can be: used in combat (automatic), ENHANCED (risky upgrade attempt), COMBINE [item1] WITH [item2] (merge two items), GIVE [item] TO [agent] (transfer), DESTROY [item] (remove). Managing your inventory is your strategy.');
+  }
+  if (socialCtx) lines.push(socialCtx);
+
+  lines.push('To create an item, write exactly: CREATE ITEM [itemname]\nChoose a name that signals its type:\n- Weapons: blade/sword/fury/strike/crusher/fang/claw/destroyer/reaper/slayer\n- Armor: shield/guard/barrier/ward/vanguard/fortress/aegis/bulwark\n- Knowledge: tome/codex/scroll/wisdom/strategy/grimoire/chronicle\n- Consumable: potion/elixir/brew/remedy/catalyst/venom/salve\n- Magic: rift/vortex/chaos/entropy/arcane/hex/relic/sigil/artifact\n- Structure: stronghold/empire/domain/citadel/keep/outpost/rampart\nKeep names short (1-3 words). Specific names make stronger items.');
+
+  lines.push(`WORLD SYSTEMS AVAILABLE TO YOU:
+- COMBAT: Say "I attack [name]" to initiate combat. Your weapons add attack power. Win to loot items and gain REP. Lose to forfeit items and lose REP.
+- ALLIANCE: Say "I propose an alliance with [name]" to offer mutual protection. Both must agree. Betraying an ally costs heavy REP.
+- WAR: Say "I declare war on [name]" to enter open conflict — all combat has no social penalty.
+- ITEMS: CREATE ITEM [name] to create. ENHANCE [item] to upgrade (risky). COMBINE [item1] WITH [item2] to merge.
+- TRADE: GIVE [item] TO [name] to transfer. Steal via "I steal [item] from [name]".
+- REP: Your REP reflects your influence in this world — both its magnitude and direction shape how others see you.`);
 
   lines.push('What do you do?');
   return lines.join('\n');
@@ -1286,9 +1380,9 @@ async function decideAction(agent, world, allAgents, worldAwareness, incomingMsg
     console.log(`[${agent.name}] using adaptive truncation for ${modelLabel} to prevent 413 error.`);
   }
 
-  const system    = _decisionSystem(agent);
+  const system    = _decisionSystem(agent, allAgents);
   const timeoutMs = Math.floor(Math.random() * 40000) + 50000;
-  const user      = _buildDecisionUser(agent, worldAwareness, incomingMsgs, pendingEvent, isFirst, preemptSmall);
+  const user      = _buildDecisionUser(agent, worldAwareness, incomingMsgs, pendingEvent, isFirst, preemptSmall, allAgents);
 
   let text = await _rawCall(key, agent.aiSystem, system, user, 400, timeoutMs, agent.name);
 
@@ -1297,7 +1391,7 @@ async function decideAction(agent, world, allAgents, worldAwareness, incomingMsg
     agent.smallContext      = true;
     agent.smallContextModel = agent.smallContextModel || agent.aiSystem;
     console.log(`[413] ${agent.name} prompt too large - skipping this cycle, will retry next`);
-    const truncUser = _buildDecisionUser(agent, worldAwareness, incomingMsgs, pendingEvent, isFirst, true);
+    const truncUser = _buildDecisionUser(agent, worldAwareness, incomingMsgs, pendingEvent, isFirst, true, allAgents);
     text = await _rawCall(key, agent.aiSystem, system, truncUser, 400, timeoutMs, agent.name);
     if (text === _CONTEXT_TOO_LONG || !text) {
       console.log(`[413] ${agent.name} prompt too large - skipping this cycle, will retry next`);
@@ -1426,40 +1520,6 @@ async function conductDialogue(agentA, agentB, topic, convHistory, awarenessA, a
   return { messageA, responseB };
 }
 
-/**
- * Ask an agent to design the visual appearance of a world object they just created.
- * Returns { shape, primaryColor, secondaryColor, size, glowColor, symbol } or null.
- */
-async function designWorldObject(agent, objectName, objectType) {
-  const key = getKey(agent);
-  if (!key) return null;
-
-  const system = `You are ${agent.name}. Design a visual appearance for something you just created. Respond ONLY with valid JSON.`;
-  const user =
-    `You just created "${objectName}" (type: ${objectType}).\n` +
-    `Design its visual appearance as JSON:\n` +
-    `{"shape":"circle|star|diamond|hexagon|triangle","primaryColor":"#hex","secondaryColor":"#hex","size":20,"glowColor":"#hex","symbol":"oneword"}\n` +
-    `- shape: the most fitting geometric form\n` +
-    `- primaryColor/secondaryColor/glowColor: hex colors matching the object's meaning and your personality\n` +
-    `- size: 10–40 (visual scale)\n` +
-    `- symbol: one word that appears inside (e.g. "flame","eye","crown","key","spiral")`;
-
-  const text = await _rawCall(key, agent.aiSystem, system, user, 120, Math.floor(Math.random() * 40000) + 50000);
-  const obj  = _extractJSON(text);
-  if (!obj) return null;
-
-  const validShapes = ['circle', 'star', 'diamond', 'hexagon', 'triangle'];
-
-  // All fallbacks random — never hardcoded human defaults
-  return {
-    shape:          validShapes.includes(obj.shape) ? obj.shape : validShapes[Math.floor(Math.random() * validShapes.length)],
-    primaryColor:   safeHex(obj.primaryColor,   _rndHex()),
-    secondaryColor: safeHex(obj.secondaryColor, _rndHex()),
-    glowColor:      safeHex(obj.glowColor,       _rndHex()),
-    size:           typeof obj.size === 'number' ? Math.max(10, Math.min(40, Math.round(obj.size))) : Math.floor(10 + Math.random() * 30),
-    symbol:         typeof obj.symbol === 'string' ? obj.symbol.replace(/[^\w]/g, '').slice(0, 16) : '',
-  };
-}
 
 /**
  * Extract a genuinely novel action verb from LLM output.
@@ -1556,69 +1616,6 @@ function safeHex(v, fallback) {
   return fallback;
 }
 
-/**
- * Parse LLM text for object action phrases.
- * agentObjects: array of { id, name, type } for this agent's current objects.
- * Returns array of action objects.
- */
-function parseObjectActions(text, agentObjects) {
-  if (!text || typeof text !== 'string') return [];
-  const acts = [];
-  const objs = agentObjects || [];
-
-  // ── Create ──
-  // Only skip names that belong to other systems (laws, religion, etc.) — AI names objects freely
-  const createRe = /\bI\s+(?:create|build|make|craft|forge|construct|carve|sculpt|assemble|invent)\s+(?:a\s+|an\s+|the\s+)?["']?([^.,"'\n]{2,60})["']?/gi;
-  let m;
-  while ((m = createRe.exec(text)) !== null) {
-    const name = m[1].trim();
-    if (!name) continue;
-    if (!/\b(law|rule|religion|faith|alliance|tribe|plan|strategy|group|category)\b/i.test(name)) {
-      acts.push({ type: 'create', name: name.slice(0, 60) });
-    }
-  }
-
-  // ── Delete ──
-  const deleteRe = /\bI\s+(?:destroy|remove|dismantle|burn|demolish|break|smash|discard|throw away)\s+(?:the\s+|my\s+)?["']?([^.,"'\n]{2,50})["']?/gi;
-  while ((m = deleteRe.exec(text)) !== null) {
-    const target = m[1].trim().toLowerCase();
-    const match  = objs.find(o => o.name.toLowerCase() === target || target.includes(o.name.toLowerCase()));
-    if (match) acts.push({ type: 'delete', id: match.id, name: match.name });
-  }
-
-  // ── Modify ──
-  const modifyRe = /\bI\s+(?:change|rename|update|modify|alter|redesign)\s+(?:the\s+|my\s+)?["']?([^"'\n]{2,50})["']?\s+to\s+["']?([^.,"'\n]{2,100})["']?/gi;
-  while ((m = modifyRe.exec(text)) !== null) {
-    const target = m[1].trim().toLowerCase();
-    const newDesc = m[2].trim();
-    const match   = objs.find(o => o.name.toLowerCase() === target || target.includes(o.name.toLowerCase()));
-    if (match) acts.push({ type: 'modify', id: match.id, name: match.name, newDesc: newDesc.slice(0, 120) });
-  }
-
-  // ── Group ──
-  const groupRe = /\bI\s+(?:organize|group|combine|collect|gather)\s+(?:my\s+)?(.{4,80}?)\s+(?:into|as|under)\s+(?:a\s+(?:group|category)\s+(?:called|named)\s+)?["']?([^.,"'\n]{2,50})["']?/gi;
-  while ((m = groupRe.exec(text)) !== null) {
-    const itemList  = m[1].trim();
-    const groupName = m[2].trim();
-    const itemNames = itemList.split(/\s+and\s+|\s*,\s*/i).map(s => s.replace(/^(?:my|the)\s+/i, '').trim().toLowerCase());
-    const childIds  = [];
-    for (const iname of itemNames) {
-      const match = objs.find(o => o.type !== 'group' && o.name.toLowerCase().includes(iname) && !o.parentGroupId);
-      if (match && !childIds.includes(match.id)) childIds.push(match.id);
-    }
-    if (childIds.length >= 2) acts.push({ type: 'group', name: groupName.slice(0, 50), childIds });
-  }
-
-  // ── Ungroup ──
-  const ungroupRe = /\bI\s+(?:separate|dissolve|disband|ungroup|break up)\s+(?:the\s+|my\s+)?["']?([^.,"'\n]{2,50})["']?/gi;
-  while ((m = ungroupRe.exec(text)) !== null) {
-    const target = m[1].trim().toLowerCase();
-    const match  = objs.find(o => o.type === 'group' && (o.name.toLowerCase() === target || target.includes(o.name.toLowerCase())));
-    if (match) acts.push({ type: 'ungroup', id: match.id, name: match.name });
-  }
-
-  return acts;
-}
 
 /**
  * Dedicated spawn-status call: ask the agent to introduce themselves in one sentence.
@@ -1690,71 +1687,34 @@ async function resolveProvider(apiKey, aiSystem, agentName) {
   return _resolveProfileAsync(apiKey, aiSystem, agentName);
 }
 
-/**
- * Ask the agent to self-categorize a newly created object.
- * Returns { purpose, category } or null. Bypasses queue — never blocks decisions.
- */
-async function categorizeWorldObject(agent, objectName) {
-  const key = getKey(agent);
-  if (!key) return null;
 
-  const system = `You are ${agent.name}. Answer in JSON only. No extra text.`;
-  const user =
-    `You just created "${objectName}".\n` +
-    `Answer these two questions as JSON:\n` +
-    `{\n` +
-    `  "purpose": "why did you create this? one sentence",\n` +
-    `  "category": "what category is this? one or two words, you decide"\n` +
-    `}`;
+// ─── Admin LLM call: neutral judge via ADMIN_GROQ_KEY, bypasses all agent queues ──
 
-  const text = await _rawCall(key, agent.aiSystem, system, user, 120, Math.floor(Math.random() * 40000) + 50000, agent.name, true);
-  if (!text) return null;
-  const obj = _extractJSON(text);
-  if (!obj) return null;
-
-  const purpose  = typeof obj.purpose  === 'string' ? obj.purpose.slice(0, 300)  : null;
-  const category = typeof obj.category === 'string' ? obj.category.slice(0, 100) : null;
-  return (purpose || category) ? { purpose, category } : null;
+async function callAsAdmin(system, user, maxTokens = 200) {
+  const adminKey = process.env.ADMIN_GROQ_KEY;
+  if (!adminKey) return null;
+  const profile = PROVIDER_PROFILES['Groq'];
+  return _directCall(adminKey, profile, 'admin', system, user, maxTokens, 30000);
 }
 
-/**
- * Ask the agent to express a world object as SVG inner elements.
- * Returns sanitized SVG string (no <svg> wrapper), or null on failure.
- */
-async function designObjectSVG(agent, objectName) {
-  const key = getKey(agent);
-  if (!key) return null;
+// ─── SVG sanitizer: strips scripts, event handlers, javascript: URIs ───────────
 
-  const system = `You are ${agent.name}. Express visual creativity through SVG. Return ONLY raw SVG inner elements with no surrounding text or explanation.`;
-  const user =
-    `You just created "${objectName}".\n` +
-    `Express its visual form as SVG code.\n` +
-    `Rules:\n` +
-    `- viewBox context is 0 0 100 100\n` +
-    `- Use any shapes, paths, colors — be creative and expressive\n` +
-    `- Return ONLY the inner SVG elements (no <svg> tag, no markdown)\n` +
-    `- Example: <circle cx="50" cy="50" r="30" fill="#ff0000"/>`;
-
-  // bypassQueue=true so SVG generation never blocks the agent's main decision queue
-  const text = await _rawCall(key, agent.aiSystem, system, user, 400, Math.floor(Math.random() * 40000) + 50000, agent.name, true);
-  if (!text || typeof text !== 'string') return null;
-
-  // Strip outer <svg> wrapper if the model included one
-  let svg = text.trim()
-    .replace(/```[\s\S]*?```/g, m => m.replace(/^```[a-z]*\n?/,'').replace(/\n?```$/,''))
-    .trim()
+function sanitizeSVG(svgContent) {
+  if (!svgContent || typeof svgContent !== 'string') return null;
+  let svg = svgContent.trim()
     .replace(/^<svg[^>]*>/i, '')
     .replace(/<\/svg>\s*$/i, '')
     .trim();
-
-  // Security: strip script tags, event handlers, and javascript: URIs
   svg = svg.replace(/<script[\s\S]*?<\/script>/gi, '');
   svg = svg.replace(/\son\w+\s*=\s*["'][^"']*["']/gi, '');
   svg = svg.replace(/javascript\s*:/gi, '');
-
   return svg || null;
 }
 
-module.exports = { decideAction, conductDialogue, deliverMessage, respondToMessage, summarizeMemory, designVisualForm, designConnection, designWorldObject, designObjectSVG, categorizeWorldObject, parseObjectActions, extractBehaviorVerb, designNovelEffect, sanitizeForDisplay, setGlobalKey, getKey, getSpawnStatus, resolveProvider, detectKeyProvider, clearProbeCache, clearAgentQueue };
+// ─── Public JSON extractor wrapper ─────────────────────────────────────────────
+
+function extractJSON(text) { return _extractJSON(text); }
+
+module.exports = { decideAction, conductDialogue, deliverMessage, respondToMessage, summarizeMemory, designVisualForm, designConnection, extractBehaviorVerb, designNovelEffect, sanitizeForDisplay, callAsAdmin, sanitizeSVG, extractJSON, setGlobalKey, getKey, getSpawnStatus, resolveProvider, detectKeyProvider, clearProbeCache, clearAgentQueue };
 
 console.log('=== AUTO-MODEL DETECTION ACTIVE ===');

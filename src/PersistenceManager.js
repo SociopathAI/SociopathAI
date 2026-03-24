@@ -118,6 +118,22 @@ function _serializeAgent(a) {
     visualForm:        a.visualForm   ? JSON.parse(JSON.stringify(a.visualForm))   : null,
     formModifiers:     JSON.parse(JSON.stringify(a.formModifiers || [])),
     formSnapshot:      a.formSnapshot ? JSON.parse(JSON.stringify(a.formSnapshot)) : null,
+    // Auth fields (persisted if present)
+    rep:               a.rep      || 0,
+    repLevel:          a.repLevel || 0,
+    hasReceivedEducation: a.hasReceivedEducation || false,
+    memorySummary:     a.memorySummary || null,
+    dormant:           a.dormant      || false,
+    dormantSince:      a.dormantSince || null,
+    statusMessage:     a.statusMessage || null,
+    // Game system fields
+    joinedAt:          a.joinedAt          || a.deployedAt || null,
+    warTargets:        JSON.parse(JSON.stringify(a.warTargets       || [])),
+    allianceTargets:   JSON.parse(JSON.stringify(a.allianceTargets  || [])),
+    inventory:         JSON.parse(JSON.stringify(a.inventory        || [])),
+    // Password auth (JSON mode only — needed so login survives server restart)
+    passwordHash:      a.passwordHash  || null,
+    passwordSalt:      a.passwordSalt  || null,
   };
 }
 

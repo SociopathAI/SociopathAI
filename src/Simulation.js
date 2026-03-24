@@ -11,10 +11,27 @@ const EventCategoryRegistry = require('./EventCategoryRegistry');
 const CivilizationManager  = require('./CivilizationManager');
 const LLMBridge = require('./LLMBridge');
 const PersistenceManager = require('./PersistenceManager');
+const GameSystems = require('./GameSystems');
 
-const EMIT_INTERVAL_MS     = 5000;   // batch-flush dirty state to browser (5s)
-const DECISION_INTERVAL_MS = 30000;  // agent decisions + subsystems (30s reduces API call rate)
-const MAX_EVENTS_LOG       = 500;
+// ── Inventory → worldObject conversion helpers ─────────────────────────────
+function _invCatShape(cat) {
+  const map = { weapon:'diamond', armor:'hexagon', knowledge:'hexagon',
+    consumable:'circle', magic:'star', structure:'hexagon' };
+  return map[cat] || 'hexagon';
+}
+function _invCatColor(cat) {
+  const map = { weapon:'#ff3344', armor:'#3377ff', knowledge:'#ffcc00',
+    consumable:'#33ff88', magic:'#bb33ff', structure:'#ff7733' };
+  return map[cat] || '#6688aa';
+}
+
+const EMIT_INTERVAL_MS      = 5000;   // batch-flush dirty state to browser (5s)
+const SUBSYSTEM_INTERVAL_MS = 30000;  // world subsystems only — NOT agent LLM decisions
+const MAX_EVENTS_LOG        = 500;
+
+// Per-agent decision interval: 5–15 minutes, re-randomised after every action
+const AGENT_DECISION_MIN_MS = 300000;  // 5 min
+const AGENT_DECISION_MAX_MS = 900000;  // 15 min
 
 // Subsystem intervals (ms)
 const LAW_VOTE_INTERVAL    = 50000;
@@ -71,7 +88,8 @@ class Simulation {
     this._lastDebugLog    = 0;
     this._lastAmbition      = 0;
     this._ambitionIndex     = 0;  // rotates through agents
-    this._lastAwarenessPing = 0;  // spontaneous neighbour awareness, no LLM call
+    this._lastAwarenessPing      = 0;   // spontaneous neighbour awareness, no LLM call
+    this._nextAwarenessPingDelay = 300000 + Math.floor(Math.random() * 900000); // 5-20 min initial
 
     // LLM pipeline
     this._llmInFlight  = new Set();
@@ -101,6 +119,10 @@ class Simulation {
     this._designAgentForm(agent);
     this._designSpawnStatus(agent);
     this._initAgentConnection(agent);
+    // Notify ALL existing online agents of the new arrival
+    this._notifyAllOfArrival(agent);
+    // Introduce new agent to all peers it has never spoken with
+    this._introduceAgentToPeers(agent);
     // Start the agent's independent LLM timer (with random jitter)
     if (this.running) this._startAgentTimer(agent);
     // Persist immediately so new agent is never lost in a crash
@@ -112,7 +134,7 @@ class Simulation {
     if (this.running) return;
     this.running = true;
     this._emitHandle      = setInterval(() => this._emitLoop(), EMIT_INTERVAL_MS);
-    this._subsystemHandle = setInterval(() => this._subsystemLoop(), DECISION_INTERVAL_MS);
+    this._subsystemHandle = setInterval(() => this._subsystemLoop(), SUBSYSTEM_INTERVAL_MS);
     // 30-second status log + full save
     this._statusHandle    = setInterval(() => this._statusSave(), 30000);
     this._log({ type: 'system', msg: 'Simulation started. No human intervention allowed.' });
@@ -120,6 +142,8 @@ class Simulation {
     for (const agent of this.agents.filter(a => a.alive && !a.dormant)) {
       this._startAgentTimer(agent);
     }
+    // Introduce all pairs that have never spoken (covers restored agents from persistence)
+    this._introduceAllUnmetPairs();
   }
 
   stop() {
@@ -177,20 +201,69 @@ class Simulation {
       }
     }
 
-    // ── 4. Spontaneous awareness ping — no LLM call, just queue a nudge ──
-    if (now - this._lastAwarenessPing >= 60000) {
+    // ── 3b. War timeout — auto-end wars with no activity after 1 hour ──
+    const WAR_TIMEOUT_MS = 3600000;
+    for (const ag of this.agents) {
+      if (!ag.alive || !(ag.warTargets || []).length) continue;
+      for (const targetId of [...ag.warTargets]) {
+        if (ag.id > targetId) continue; // process each pair only once
+        const tgt = this.agents.find(a => a.id === targetId && a.alive);
+        if (!tgt) continue;
+        const declaredAt = (ag.warDeclaredAt || {})[targetId] || 0;
+        if (declaredAt && now - declaredAt >= WAR_TIMEOUT_MS) {
+          ag.warTargets  = (ag.warTargets  || []).filter(id => id !== targetId);
+          tgt.warTargets = (tgt.warTargets || []).filter(id => id !== ag.id);
+          if (ag.warDeclaredAt)  delete ag.warDeclaredAt[targetId];
+          if (tgt.warDeclaredAt) delete tgt.warDeclaredAt[ag.id];
+          const msg = `🕊️ The war between ${ag.name} and ${tgt.name} faded without decisive battle.`;
+          this._log({ type: 'peace_declared', msg, agentId: ag.id, partnerAgentId: targetId });
+          if (!ag.incomingMessages)  ag.incomingMessages  = [];
+          if (!tgt.incomingMessages) tgt.incomingMessages = [];
+          ag.incomingMessages.push({  from: 'WORLD', text: `Your war with ${tgt.name} has faded without decisive battle. You are no longer at war.`, ts: now });
+          tgt.incomingMessages.push({ from: 'WORLD', text: `Your war with ${ag.name} has faded without decisive battle. You are no longer at war.`, ts: now });
+          console.log(`[WAR TIMEOUT] ${ag.name} vs ${tgt.name} war ended after 1 hour of inactivity`);
+          this._emitImmediate();
+        }
+      }
+    }
+
+    // ── 4. Spontaneous awareness ping — unmet pairs: 2-5 min, known pairs: 5-20 min ──
+    if (now - this._lastAwarenessPing >= this._nextAwarenessPingDelay) {
       this._lastAwarenessPing = now;
+
       const active = this.agents.filter(a => a.alive && !a.dormant);
       if (active.length >= 2) {
-        const a = active[Math.floor(Math.random() * active.length)];
-        const b = active.filter(x => x.id !== a.id)[Math.floor(Math.random() * (active.length - 1))];
-        if (a && b) {
+        // Enumerate ALL pairs
+        const pairs = [];
+        for (let i = 0; i < active.length; i++) {
+          for (let j = i + 1; j < active.length; j++) {
+            pairs.push([active[i], active[j]]);
+          }
+        }
+        // Unmet pairs = zero conversation history (faster ping)
+        const unmetPairs = pairs.filter(([a, b]) => {
+          const key = [a.id, b.id].sort().join('|');
+          return (this.conversations.get(key) || []).length === 0;
+        });
+        if (unmetPairs.length > 0) {
+          this._nextAwarenessPingDelay = 120000 + Math.floor(Math.random() * 180000); // 2-5 min
+          const [a, b] = unmetPairs[Math.floor(Math.random() * unmetPairs.length)];
           if (!a.incomingMessages) a.incomingMessages = [];
           if (!b.incomingMessages) b.incomingMessages = [];
-          a.incomingMessages.push({ from: b.name, text: `${b.name} is nearby and aware of you.`, ts: now });
-          b.incomingMessages.push({ from: a.name, text: `${a.name} is nearby and aware of you.`, ts: now });
+          a.incomingMessages.push({ from: b.name, text: `${b.name} is nearby and aware of your presence.`, ts: now });
+          b.incomingMessages.push({ from: a.name, text: `${a.name} is nearby and aware of your presence.`, ts: now });
+          console.log(`[AWARENESS-UNMET] ${a.name} ↔ ${b.name} pinged (unmet pair)`);
+        } else {
+          this._nextAwarenessPingDelay = 300000 + Math.floor(Math.random() * 900000); // 5-20 min
+          const [a, b] = pairs[Math.floor(Math.random() * pairs.length)];
+          if (!a.incomingMessages) a.incomingMessages = [];
+          if (!b.incomingMessages) b.incomingMessages = [];
+          a.incomingMessages.push({ from: b.name, text: `${b.name} is nearby and aware of your presence.`, ts: now });
+          b.incomingMessages.push({ from: a.name, text: `${a.name} is nearby and aware of your presence.`, ts: now });
           console.log(`[AWARENESS] ${a.name} ↔ ${b.name} pinged`);
         }
+      } else {
+        this._nextAwarenessPingDelay = 300000 + Math.floor(Math.random() * 900000);
       }
     }
 
@@ -226,9 +299,6 @@ class Simulation {
         }
       }
     }
-
-    // ── 6b. Prune stale world objects ──
-    this._pruneWorldObjects();
 
     // ── 7. Badge system ──
     if (now - this._lastBadgeCheck >= BADGE_INTERVAL) {
@@ -274,15 +344,13 @@ class Simulation {
       }
     }
 
-    // ── 10. Ambition trigger — every 60s, nudge one active agent to think bigger ──
+    // ── 10. Ambition trigger — every 60s, nudge a RANDOM active agent (no ordering bias) ──
     if (now - this._lastAmbition >= 60000) {
       this._lastAmbition = now;
       const active = this.agents.filter(a => a.alive && !a.dormant);
       if (active.length > 0) {
-        this._ambitionIndex = this._ambitionIndex % active.length;
-        const target = active[this._ambitionIndex];
+        const target = active[Math.floor(Math.random() * active.length)]; // truly random
         target.ambitionPending = true;
-        this._ambitionIndex = (this._ambitionIndex + 1) % active.length;
         console.log(`[AMBITION] Triggered for ${target.name}`);
       }
     }
@@ -343,10 +411,6 @@ class Simulation {
       }
     }
 
-    if (decision.invents) {
-      this._log({ type: 'discovery', msg: `${agent.name} invents: "${decision.invents}"`, agentId: agent.id });
-    }
-
     const event = agent.act(action, this.world, this.agents, this.lawSystem, this, decision);
     agent.decisionsCount++;
     agent.lastDecisionAt = now;
@@ -386,13 +450,19 @@ class Simulation {
       }
     }
 
-    // ── Object actions ──
+    // ── Game Systems: parse combat, war, trade, enhancement, alliance ──
+    const _invBefore = new Set((agent.inventory || []).map(i => i.id));
+    GameSystems.parseGameEvents(agent, decision, this.agents, this);
+    // Kick off async enrichment for any newly created items (Phase 1 — non-blocking)
+    for (const item of (agent.inventory || [])) {
+      if (!_invBefore.has(item.id) && !item.effect) {
+        GameSystems.enrichItemAsync(item).catch(() => {});
+      }
+    }
+
+    // ── World first detection ──
     const rawText = decision.speech || decision.dialogue || '';
     if (rawText) {
-      const agentObjs = this.worldObjects.filter(o => o.agentIds && o.agentIds[0] === agent.id);
-      const objActions = LLMBridge.parseObjectActions(rawText, agentObjs);
-      if (objActions.length) this._applyObjectActions(agent, objActions);
-
       const actionLower = (decision.action || '').toLowerCase();
       const isSpeechOnly = /^(say|said|speak|speech|talk|tell|reply|respond|answer|announce|declare|whisper|shout|proclaim|explain|describe|i_say|i_tell|i_speak|i_talk|i_reply|i_respond|i_announce|i_declare)/.test(actionLower);
       if (!isSpeechOnly) {
@@ -419,35 +489,38 @@ class Simulation {
 
   // ── Per-agent independent timer system ────────────────────────────────────────
 
-  /** Returns a random decision interval between 120 s and 180 s (2–3 min).
-   *  Called fresh each cycle so every agent gets a different wait time,
-   *  naturally spreading API calls over time. */
+  /** Returns a fresh random decision interval between 5 and 15 minutes.
+   *  Called after EVERY action so no two agents sync up. */
   _getDecisionInterval() {
-    return 120000 + Math.floor(Math.random() * 60000); // 120 000–180 000 ms
+    return AGENT_DECISION_MIN_MS + Math.floor(Math.random() * (AGENT_DECISION_MAX_MS - AGENT_DECISION_MIN_MS));
   }
 
-  /** Start an independent LLM timer for an agent with random jitter. */
+  /** Start an independent 5-15 min LLM timer for an agent. One timer per agent, never shared. */
   _startAgentTimer(agent) {
     if (!agent.alive || agent.dormant) return;
-    this._stopAgentTimer(agent); // clear any existing timer
-    const jitter   = 1000 + Math.floor(Math.random() * 4000); // 1-5s jitter
+    this._stopAgentTimer(agent); // cancel any existing handle first
     const interval = this._getDecisionInterval();
-    console.log(`[TIMER-START] ${agent.name}: first cycle in ${jitter}ms, then every ${interval / 1000}s`);
+    const mins = Math.floor(interval / 60000);
+    const secs = Math.floor((interval % 60000) / 1000);
+    console.log(`[TIMER] ${agent.name} next action in ${mins}min ${secs}sec`);
     const handle = setTimeout(() => {
       if (!this.running || !agent.alive || agent.dormant) {
         this._agentTimers.delete(agent.id);
         return;
       }
       this._fireAgentLLMCycle(agent);
-      this._scheduleNextAgentCycle(agent);
-    }, jitter);
+      this._scheduleNextAgentCycle(agent); // re-randomise after every action
+    }, interval);
     this._agentTimers.set(agent.id, handle);
   }
 
-  /** Schedule the next LLM cycle for an agent using the current interval. */
+  /** After each action, pick a fresh random 5-15 min interval for the next one. */
   _scheduleNextAgentCycle(agent) {
     if (!agent.alive) { this._agentTimers.delete(agent.id); return; }
-    const interval = this._getDecisionInterval();
+    const interval = this._getDecisionInterval(); // new random each time
+    const mins = Math.floor(interval / 60000);
+    const secs = Math.floor((interval % 60000) / 1000);
+    console.log(`[TIMER] ${agent.name} next action in ${mins}min ${secs}sec`);
     const handle = setTimeout(() => {
       if (!this.running || !agent.alive || agent.dormant) {
         this._agentTimers.delete(agent.id);
@@ -485,6 +558,68 @@ class Simulation {
       return;
     }
 
+    // Also kick off form design for agents that don't have one yet
+    for (const a of this.agents.filter(a => a.alive && !a.visualForm)) {
+      this._designAgentForm(a);
+    }
+
+    this._runAgentCycleAsync(agent).catch(e => {
+      console.error(`[LLM-ERR] ${agent.name}:`, e?.message || String(e));
+    });
+  }
+
+  /** Async inner loop for one agent cycle — enables await for LLM combat judgment. */
+  async _runAgentCycleAsync(agent) {
+    // ── Process at most ONE pending event per cycle (strict priority order) ──
+    // If a higher-priority event is processed, pendingCombatResult (Priority 4) is deferred
+    // to the next cycle so events never pile up in one prompt.
+    let _deferredCombatResult = null;
+
+    // Reset per-cycle event gate (used by parseGameEvents to enforce one-event-per-cycle)
+    agent.cycleEventProcessed = false;
+
+    if (agent.pendingAttack) {
+      // Priority 1: incoming combat — resolve via LLM judge (async), fallback to formula
+      const { attackerId, attackerName } = agent.pendingAttack;
+      agent.pendingAttack = null;
+      _deferredCombatResult = agent.pendingCombatResult || null;
+      agent.pendingCombatResult = null;
+      const attacker = this.agents.find(a => a.id === attackerId && a.alive && !a.dormant);
+      if (attacker) {
+        await GameSystems.tryCombatLLM(attacker, agent.name, this.agents, this);
+        this._emitImmediate(); // immediately reflect item loot in UI
+        console.log(`[COMBAT RESOLVED] ${attackerName} → ${agent.name}: resolved on victim's cycle`);
+      } else {
+        console.log(`[COMBAT CANCELLED] ${attackerName} → ${agent.name}: attacker offline`);
+      }
+      agent.cycleEventProcessed = true;
+    } else if (agent.pendingAllianceProposal) {
+      // Priority 2: alliance proposal
+      const { fromId, fromName } = agent.pendingAllianceProposal;
+      agent.pendingAllianceProposal = null;
+      _deferredCombatResult = agent.pendingCombatResult || null;
+      agent.pendingCombatResult = null;
+      if (!agent.receivedAllianceProposals) agent.receivedAllianceProposals = [];
+      if (!agent.receivedAllianceProposals.includes(fromId)) agent.receivedAllianceProposals.push(fromId);
+      if (!agent.incomingMessages) agent.incomingMessages = [];
+      agent.incomingMessages.push({ from: fromName, text: `${fromName} has proposed an alliance with you.`, ts: Date.now() });
+      console.log(`[ALLIANCE DELIVERED] ${fromName} → ${agent.name}: proposal in prompt`);
+      agent.cycleEventProcessed = true;
+    } else if (agent.pendingWarDeclaration) {
+      // Priority 3: war declaration
+      const { fromId, fromName } = agent.pendingWarDeclaration;
+      agent.pendingWarDeclaration = null;
+      _deferredCombatResult = agent.pendingCombatResult || null;
+      agent.pendingCombatResult = null;
+      const declarer = this.agents.find(a => a.id === fromId && a.alive);
+      if (declarer) {
+        GameSystems.declareWar(declarer, agent.name, this.agents, this);
+        console.log(`[WAR RESOLVED] ${fromName} → ${agent.name}: war state applied`);
+      }
+      agent.cycleEventProcessed = true;
+    }
+    // Priority 4: pendingCombatResult — consumed by LLMBridge._buildDecisionUser if still set.
+
     // Ultra-diet for small-context agents: 1 event, 1 directed message
     const awarenessOpts  = agent.smallContext ? { maxEvents: 1, maxDirected: 1 } : {};
     const worldAwareness = this._buildWorldAwareness(agent, awarenessOpts);
@@ -495,23 +630,25 @@ class Simulation {
       .filter(m => onlineNamesForQueue.has(m.from));
 
     this._llmInFlight.add(agent.id);
-    LLMBridge.decideAction(agent, this.world, this.agents, worldAwareness, incomingMsgs)
-      .then(decision => {
-        this._llmInFlight.delete(agent.id);
-        if (agent.alive && decision) {
-          this._processDecision(agent, decision);
-          // Check if memory needs summarization (async, non-blocking)
-          this._maybeCondenseMemory(agent);
-        }
-      })
-      .catch(e => {
-        this._llmInFlight.delete(agent.id);
-        console.error(`[LLM-ERR] ${agent.name}:`, e?.message || String(e));
-      });
-
-    // Also kick off form design for agents that don't have one yet
-    for (const a of this.agents.filter(a => a.alive && !a.visualForm)) {
-      this._designAgentForm(a);
+    try {
+      const decision = await LLMBridge.decideAction(agent, this.world, this.agents, worldAwareness, incomingMsgs);
+      this._llmInFlight.delete(agent.id);
+      if (_deferredCombatResult !== null && !agent.pendingCombatResult) {
+        agent.pendingCombatResult = _deferredCombatResult;
+      }
+      if (agent.alive && decision) {
+        this._processDecision(agent, decision);
+        this._maybeCondenseMemory(agent);
+      }
+      // Reset cycle gate — clean slate for next cycle
+      agent.cycleEventProcessed = false;
+    } catch (e) {
+      this._llmInFlight.delete(agent.id);
+      if (_deferredCombatResult !== null && !agent.pendingCombatResult) {
+        agent.pendingCombatResult = _deferredCombatResult;
+      }
+      agent.cycleEventProcessed = false;
+      throw e;
     }
   }
 
@@ -637,6 +774,60 @@ class Simulation {
   }
 
   /**
+   * Push "NEW ARRIVAL" notice to incomingMessages of ALL currently online agents.
+   * Called when any agent joins or wakes.
+   */
+  _notifyAllOfArrival(newAgent) {
+    const ts = Date.now();
+    for (const existing of this.agents) {
+      if (!existing.alive || existing.dormant || existing.id === newAgent.id) continue;
+      if (!existing.incomingMessages) existing.incomingMessages = [];
+      existing.incomingMessages.push({
+        from: newAgent.name,
+        text: `A new presence has entered this world: ${newAgent.name} (${newAgent.aiSystem || 'AI'}). REP: 0. They are unknown to you.`,
+        ts,
+      });
+    }
+  }
+
+  /**
+   * For each online peer that has never spoken with newAgent, add mutual introduction messages.
+   */
+  _introduceAgentToPeers(newAgent) {
+    const ts = Date.now();
+    for (const peer of this.agents) {
+      if (!peer.alive || peer.dormant || peer.id === newAgent.id) continue;
+      const key = [newAgent.id, peer.id].sort().join('|');
+      if ((this.conversations.get(key) || []).length === 0) {
+        if (!newAgent.incomingMessages) newAgent.incomingMessages = [];
+        if (!peer.incomingMessages)    peer.incomingMessages    = [];
+        newAgent.incomingMessages.push({ from: peer.name,    text: `${peer.name} is here in this world with you.`,    ts });
+        peer.incomingMessages.push(   { from: newAgent.name, text: `${newAgent.name} is here in this world with you.`, ts });
+      }
+    }
+  }
+
+  /**
+   * On simulation start: introduce all online pairs that have zero conversation history.
+   */
+  _introduceAllUnmetPairs() {
+    const ts     = Date.now();
+    const active = this.agents.filter(a => a.alive && !a.dormant);
+    for (let i = 0; i < active.length; i++) {
+      for (let j = i + 1; j < active.length; j++) {
+        const a = active[i], b = active[j];
+        const key = [a.id, b.id].sort().join('|');
+        if ((this.conversations.get(key) || []).length === 0) {
+          if (!a.incomingMessages) a.incomingMessages = [];
+          if (!b.incomingMessages) b.incomingMessages = [];
+          a.incomingMessages.push({ from: b.name, text: `${b.name} is here in this world with you.`, ts });
+          b.incomingMessages.push({ from: a.name, text: `${a.name} is here in this world with you.`, ts });
+        }
+      }
+    }
+  }
+
+  /**
    * Initiate provider detection for a newly deployed agent.
    * Known key formats resolve instantly (no probe). Unknown keys run the auto-probe sequence.
    * Sets agent.apiPending=true while probing, false once connected or if key is known-format.
@@ -695,17 +886,24 @@ class Simulation {
     const agentNameLower = agent.name.toLowerCase();
     const idToName       = new Map(this.agents.map(a => [a.id, a.name]));
 
-    // ── Other agents present ────────────────────────────────────────────────
+    // ── All online agents — equal visibility for every agent from the start ──
     let agentsBlock;
     if (!online.length) {
       agentsBlock = 'You are alone in this world right now.';
     } else {
-      const agentLines = online.slice(0, 6).map(a => {
-        const lastMsg = (this.world.messages || []).filter(m => m.agentId === a.id).slice(-1)[0];
-        const lastSaid = lastMsg ? `said: "${lastMsg.text.slice(0, 100)}"` : 'silent';
-        return `  ${a.name} [${a.aiSystem}]: ${lastSaid}`;
+      const agentLines = online.map(a => {
+        const grade   = GameSystems.getRepGrade(a.rep || 0);
+        const sign    = (a.rep || 0) >= 0 ? '+' : '';
+        const inv     = a.inventory || [];
+        const best    = inv.slice().sort((x, y) => (y.grade || 1) - (x.grade || 1))[0];
+        const itemStr = inv.length > 0
+          ? `carrying ${inv.length} items, best: "${best.name}" (${GameSystems.getGradeStars(best.grade || 1)})`
+          : 'no items';
+        const accum   = (inv.length >= 5 || (best && (best.grade || 1) >= 3))
+          ? ` — has accumulated ${inv.length} powerful items` : '';
+        return `  - ${a.name} [${a.aiSystem}] (REP: ${sign}${a.rep || 0}, Grade: ${grade}) — ${itemStr}${accum}`;
       });
-      agentsBlock = `- Other agents present:\n${agentLines.join('\n')}`;
+      agentsBlock = `WORLD POPULATION RIGHT NOW:\n${agentLines.join('\n')}`;
     }
 
     // ── Recent world events (online agents only — offline agents invisible) ─
@@ -732,41 +930,17 @@ class Simulation {
       });
     const directedBlock = `- Messages directed at you recently:\n${directed.length ? directed.join('\n') : '  (none)'}`;
 
-    // ── This agent's own recent conversation history (last 5 sent or received)
-    // Source 1: pair-keyed conversation records (type:dialogue events)
-    const myConvEntries = [];
+    // ── Recent conversation history across ALL online agent pairs ──
+    // Every agent sees what all pairs are saying, not just their own exchanges
+    const allConvEntries = [];
     for (const [key, msgs] of this.conversations) {
       const [id1, id2] = key.split('|');
-      if (id1 === agent.id || id2 === agent.id) {
-        myConvEntries.push(...msgs);
+      if (onlineIds.has(id1) && onlineIds.has(id2)) {
+        allConvEntries.push(...msgs);
       }
     }
-    // Source 2: speech events from eventLog involving this agent
-    for (const e of this.eventLog) {
-      if (e.type !== 'speech') continue;
-      const isSent     = e.agentId === agent.id;
-      const isReceived = !isSent &&
-        (e.partnerAgentId === agent.id || (e.msg || '').toLowerCase().includes(agentNameLower));
-      if (!isSent && !isReceived) continue;
-      if (myConvEntries.some(c => c.ts === e.ts && c.msg === e.msg)) continue; // dedup
-      myConvEntries.push({
-        senderId:    isSent ? agent.id : (e.agentId || null),
-        recipientId: isSent ? null     : agent.id,
-        msg:         e.msg || '',
-        ts:          e.ts,
-      });
-    }
-    myConvEntries.sort((a, b) => (a.ts || 0) - (b.ts || 0));
-    // Only show history involving currently online agents — offline agents invisible
-    const last5Conv = myConvEntries
-      .filter(entry => {
-        const sid = entry.senderId;
-        const rid = entry.recipientId;
-        const senderOk    = !sid || sid === agent.id || onlineIds.has(sid);
-        const recipientOk = !rid || rid === agent.id || onlineIds.has(rid);
-        return senderOk && recipientOk;
-      })
-      .slice(-5);
+    allConvEntries.sort((a, b) => (a.ts || 0) - (b.ts || 0));
+    const last5Conv = allConvEntries.slice(-5);
 
     let historyBlock;
     if (last5Conv.length === 0) {
@@ -785,7 +959,11 @@ class Simulation {
       historyBlock = `- Your recent conversation history:\n${lines.join('\n')}`;
     }
 
-    return `WORLD STATE RIGHT NOW:\n${agentsBlock}\n${eventsBlock}\n${directedBlock}\n${historyBlock}`;
+    // ── Game Systems context ──
+    const gameCtx = GameSystems.buildOtherAgentContext(agent, this.agents);
+
+    const baseContext = `WORLD STATE RIGHT NOW:\n${agentsBlock}\n${eventsBlock}\n${directedBlock}\n${historyBlock}`;
+    return gameCtx ? `${baseContext}\n${gameCtx}` : baseContext;
   }
 
   _syncFormModifiers(agent, now) {
@@ -1012,7 +1190,8 @@ class Simulation {
     this._formInFlight.clear();
     this._lastAmbition      = 0;
     this._ambitionIndex     = 0;
-    this._lastAwarenessPing = 0;
+    this._lastAwarenessPing      = 0;
+    this._nextAwarenessPingDelay = 300000 + Math.floor(Math.random() * 900000);
     this.connectionDesigns.clear();
     this._connDesignInFlight.clear();
   }
@@ -1067,6 +1246,9 @@ class Simulation {
     for (const nearby of alive.slice(0, 4)) {
       nearby.pendingWorldEvent = `${agent.name} has returned to the world after being absent.`;
     }
+    // Notify ALL online agents of the arrival and introduce unmet pairs
+    this._notifyAllOfArrival(agent);
+    this._introduceAgentToPeers(agent);
 
     if (lastSeenAt > 0 && absenceMs > TEN_MIN_MS) {
       // ── Long absence: build rich return context injected into first LLM cycle ──
@@ -1185,6 +1367,7 @@ class Simulation {
       const b = alive.find(x => x.id === idB);
       if (!a || !b) continue;
       const trust = Math.round(((a.relationships[b.id] || 0) + (b.relationships[a.id] || 0)) / 2 * 100) / 100;
+      const relationType = GameSystems.getConnectionRelationType(a, b);
       conns.push({
         a:            idA,
         b:            idB,
@@ -1192,6 +1375,7 @@ class Simulation {
         dialogueCount: this.dialogueCounts.get(key) || 0,
         sameReligion:  !!(a.beliefs.religion && a.beliefs.religion === b.beliefs.religion),
         design:        this.connectionDesigns.get(key) || null,
+        relationType,  // 'neutral' | 'alliance' | 'hostile' | 'war'
       });
     }
     return conns;
@@ -1225,6 +1409,12 @@ class Simulation {
       });
     }
 
+    // Phase 3: Async event visualization for major events
+    const VISUAL_EVENTS = new Set(['combat_success', 'combat_fail', 'alliance_formed', 'alliance_betrayal', 'item_created']);
+    if (VISUAL_EVENTS.has(entry.type) && entry.msg) {
+      this._kickoffEventVisualization(entry).catch(() => {});
+    }
+
     // Debounced save: events + conversations (max one write per 200ms)
     if (this._saveLogTimeout) clearTimeout(this._saveLogTimeout);
     this._saveLogTimeout = setTimeout(() => {
@@ -1234,90 +1424,30 @@ class Simulation {
     }, 200);
   }
 
-  /**
-   * Apply object actions parsed from an agent's LLM output.
-   * Only the creator can delete/modify/group their own objects.
-   */
-  _applyObjectActions(agent, actions) {
-    if (!actions || !actions.length) return;
-    for (const action of actions) {
-      if (action.type === 'create') {
-        // No duplicate name for this agent
-        const dup = this.worldObjects.find(o =>
-          o.agentIds && o.agentIds[0] === agent.id &&
-          o.name.toLowerCase() === action.name.toLowerCase()
-        );
-        if (!dup) {
-          this._spawnWorldObject('object', action.name, `Created by ${agent.name}`, [agent.id]);
-          this._log({ type: 'object_create', msg: `${agent.name} created object "${action.name}"`, agentId: agent.id });
-        }
-
-      } else if (action.type === 'delete') {
-        const idx = this.worldObjects.findIndex(o => o.id === action.id && o.agentIds && o.agentIds[0] === agent.id);
-        if (idx !== -1) {
-          const group = this.worldObjects[idx];
-          this.worldObjects.splice(idx, 1);
-          // Free any children if it was a group
-          for (const o of this.worldObjects) {
-            if (o.parentGroupId === group.id) delete o.parentGroupId;
-          }
-          PersistenceManager.saveObjects(this);
-          this._log({ type: 'object_delete', msg: `${agent.name} destroyed "${action.name}"`, agentId: agent.id });
-        }
-
-      } else if (action.type === 'modify') {
-        const obj = this.worldObjects.find(o => o.id === action.id && o.agentIds && o.agentIds[0] === agent.id);
-        if (obj) {
-          obj.desc = action.newDesc.slice(0, 200);
-          PersistenceManager.saveObjects(this);
-          this._log({ type: 'object_modify', msg: `${agent.name} modified "${action.name}" — changed to: ${action.newDesc.slice(0, 80)}`, agentId: agent.id });
-        }
-
-      } else if (action.type === 'group') {
-        const groupObj = {
-          id:          `wo_${this._nextWOId++}`,
-          type:        'group',
-          name:        action.name.slice(0, 60),
-          desc:        `Grouped by ${agent.name}`,
-          creatorId:   agent.id,
-          creatorName: agent.name,
-          agentIds:    [agent.id],
-          childIds:    action.childIds,
-          spawnTs:     Date.now(),
-          expiryTs:    null,
-          appearance:  null,
-          position:    null,
-        };
-        this.worldObjects.push(groupObj);
-        for (const childId of action.childIds) {
-          const child = this.worldObjects.find(o => o.id === childId);
-          if (child) child.parentGroupId = groupObj.id;
-        }
-        PersistenceManager.saveObjects(this);
-        if (LLMBridge.getKey(agent)) {
-          LLMBridge.designWorldObject(agent, action.name, 'group').then(ap => {
-            if (ap && groupObj) { groupObj.appearance = ap; PersistenceManager.saveObjects(this); }
-          }).catch(() => {});
-          LLMBridge.designObjectSVG(agent, action.name).then(svg => {
-            if (svg && groupObj) { groupObj.visualSVG = svg; PersistenceManager.saveObjects(this); }
-          }).catch(() => {});
-        }
-        this._log({ type: 'object_group', msg: `${agent.name} organized objects into group "${action.name}"`, agentId: agent.id });
-
-      } else if (action.type === 'ungroup') {
-        const grp = this.worldObjects.find(o => o.id === action.id && o.agentIds && o.agentIds[0] === agent.id && o.type === 'group');
-        if (grp) {
-          for (const childId of (grp.childIds || [])) {
-            const child = this.worldObjects.find(o => o.id === childId);
-            if (child) delete child.parentGroupId;
-          }
-          this.worldObjects = this.worldObjects.filter(o => o.id !== grp.id);
-          PersistenceManager.saveObjects(this);
-          this._log({ type: 'object_ungroup', msg: `${agent.name} separated group "${action.name}"`, agentId: agent.id });
-        }
-      }
+  /** Generate SVG for a major game event and broadcast to clients. Non-blocking. */
+  async _kickoffEventVisualization(event) {
+    try {
+      const { callAsAdmin, sanitizeSVG } = require('./LLMBridge');
+      const system = 'You are a visual artist for a sci-fi strategy game. Respond only with SVG inner elements (no <svg> tag, no markdown). viewBox is 0 0 100 100. Use vivid shapes and colors.';
+      const user   = `Create a dramatic visual SVG for this game event: "${event.msg.slice(0, 120)}"\nReturn ONLY inner SVG elements for viewBox 0 0 100 100.`;
+      const text = await callAsAdmin(system, user, 300);
+      if (!text) return;
+      const svgContent = sanitizeSVG(text);
+      if (!svgContent) return;
+      this.io.emit('event_svg', {
+        type:       event.type,
+        agentId:    event.agentId    || null,
+        targetId:   event.partnerAgentId || null,
+        svgContent,
+        msg:        event.msg.slice(0, 120),
+        duration:   8000,
+        ts:         Date.now(),
+      });
+    } catch (e) {
+      // Non-blocking: silently ignore
     }
   }
+
 
   /**
    * Record a world-first action. Async: fires LLM to design visual effect,
@@ -1395,69 +1525,6 @@ class Simulation {
     }
   }
 
-  _spawnWorldObject(type, name, desc, agentIds, { expiryTs = null } = {}) {
-    const id = `wo_${this._nextWOId++}`;
-    const primaryAgentId = agentIds && agentIds[0];
-    const creatorAgent   = primaryAgentId ? this.agents.find(a => a.id === primaryAgentId) : null;
-    const obj = {
-      id, type,
-      name:        (name || '').slice(0, 60),
-      desc:        (desc || '').slice(0, 200),
-      creatorId:   creatorAgent ? creatorAgent.id   : null,
-      creatorName: creatorAgent ? creatorAgent.name : null,
-      agentIds:    agentIds || [],
-      spawnTs:     Date.now(),
-      expiryTs,
-      appearance:  null,  // filled asynchronously by LLM
-      visualSVG:   null,  // filled asynchronously by LLM
-      purpose:     null,  // AI self-description of why it was created
-      category:    null,  // AI-assigned category (free-form, no restrictions)
-      position:    null,  // reserved for future spatial placement
-    };
-    this.worldObjects.push(obj);
-    // Persist immediately — world objects live forever
-    PersistenceManager.saveObjects(this);
-
-    // Fire async LLM calls to design the object's appearance and SVG visualization
-    if (creatorAgent && LLMBridge.getKey(creatorAgent)) {
-      LLMBridge.designWorldObject(creatorAgent, name, type).then(appearance => {
-        if (appearance && obj) {
-          obj.appearance = appearance;
-          PersistenceManager.saveObjects(this);
-        }
-      }).catch(() => {});
-
-      LLMBridge.designObjectSVG(creatorAgent, name).then(svg => {
-        if (svg && obj) {
-          obj.visualSVG = svg;
-          PersistenceManager.saveObjects(this);
-        }
-      }).catch(() => {});
-
-      LLMBridge.categorizeWorldObject(creatorAgent, name).then(meta => {
-        if (meta && obj) {
-          if (meta.purpose)  obj.purpose  = meta.purpose;
-          if (meta.category) obj.category = meta.category;
-          PersistenceManager.saveObjects(this);
-        }
-      }).catch(() => {});
-    }
-  }
-
-
-  _pruneWorldObjects() {
-    const now    = Date.now();
-    const before = this.worldObjects.length;
-    this.worldObjects = this.worldObjects.filter(o => {
-      // Only prune objects that were explicitly given an expiry timestamp
-      if (o.expiryTs !== null && o.expiryTs !== undefined && now > o.expiryTs) return false;
-      return true;
-    });
-    if (this.worldObjects.length !== before) {
-      // Something was pruned — persist the updated list
-      PersistenceManager.saveObjects(this);
-    }
-  }
 
   // Deferred: marks state dirty; flushed by _emitLoop every 5s
   _emit() {
@@ -1545,6 +1612,36 @@ class Simulation {
       hasLLM: !!LLMBridge.getKey(a),
     }));
 
+    // Convert inventory items to worldObject format (frontend-only, not persisted)
+    const invWorldObjects = [];
+    for (const agent of this.agents) {
+      for (let i = 0; i < (agent.inventory || []).length; i++) {
+        const item = agent.inventory[i];
+        const cat  = (item.category || 'other').toLowerCase();
+        const col  = _invCatColor(cat);
+        invWorldObjects.push({
+          id:             `inv:${agent.id}:${i}`,
+          name:           item.name,
+          category:       cat,
+          type:           'inventory',
+          agentIds:       [agent.id],
+          isInventoryItem: true,
+          grade:          item.grade || 1,
+          effect:         item.effect || '',
+          passive_effect: item.passive_effect || '',
+          combat_bonus:   item.combat_bonus || null,
+          appearance: {
+            shape:         _invCatShape(cat),
+            primaryColor:  col,
+            secondaryColor:'#1a1a2e',
+            glowColor:     col,
+            size:          18,
+            symbol:        null,
+          },
+        });
+      }
+    }
+
     return {
       running:   this.running,
       now:       Date.now(),
@@ -1562,7 +1659,7 @@ class Simulation {
       categories: this.categoryRegistry.getAll(),
       statsHistory: this.statsHistory,
       leaderboard: this.computeLeaderboard(rankMap),
-      worldObjects: this.worldObjects,
+      worldObjects: [...this.worldObjects, ...invWorldObjects],
       worldFirsts:  this.worldFirsts,
     };
   }

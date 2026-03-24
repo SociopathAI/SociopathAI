@@ -30,6 +30,18 @@ function agentHue(a) {
 /** CSS color string from hue, sat%, lit%. */
 function hsl(h, s, l) { return `hsl(${h},${s}%,${l}%)`; }
 
+/** Format REP number with k/M/B suffix */
+function formatRep(rep) {
+  const sign = rep >= 0 ? '+' : '-';
+  const abs  = Math.abs(rep);
+  if (abs >= 1e9)  return sign + (abs / 1e9).toFixed(1).replace(/\.0$/, '') + 'B';
+  if (abs >= 1e6)  return sign + (abs / 1e6).toFixed(1).replace(/\.0$/, '') + 'M';
+  if (abs >= 1e5)  return sign + Math.round(abs / 1e3) + 'k';
+  if (abs >= 1e4)  return sign + Math.round(abs / 1e3) + 'k';
+  if (abs >= 1e3)  return sign + (abs / 1e3).toFixed(1).replace(/\.0$/, '') + 'k';
+  return sign + abs;
+}
+
 /** Parse hex color → rgba string */
 function hexRgba(hex, a) {
   if (!hex || hex.length < 7) return `rgba(136,170,255,${a.toFixed(2)})`;
@@ -70,6 +82,7 @@ const CAM_LERP    = 0.10;     // camera smoothing
 // Background stars
 const STAR_COUNT  = 200;
 
+
 // ── Starmap class ──────────────────────────────────────────────────────────────
 
 class Starmap {
@@ -96,10 +109,8 @@ class Starmap {
     this.trackPulses = [];   // [{ x, y, t }]
     this._novelEffects = []; // [{ x, y, t, color, symbol, wfId }]
 
-    // World objects — persistent glowing markers
+    // World objects (inventory items sent from server as worldObjects array)
     this.worldObjects       = [];        // [{ ...serverData, x, y, spawnAnimT, pulsePhase }]
-    this._serverWOMap       = new Map(); // id → server obj, for new-object detection
-    this._svgImageCache     = new Map(); // id → { svg, img, loading, failed }
     this._catGroupPositions = new Map(); // "agentId:category" → {wx, wy, agentId, category, objs}
     this.onCategoryClick    = null;      // (agentId, category, objs, screenX, screenY) => void
 
@@ -123,12 +134,11 @@ class Starmap {
     // Hover highlight from external sources (card hover etc.) — separate from click-highlight
     this._hoverHighlightId = null;
 
-    // World object state
-    this._expandedAgentIds = new Set();  // agentIds whose objects are currently shown
-    this._orbitPositions   = new Map();  // objId → { wx, wy }  rebuilt each frame for visible objs
-    this._expandedGroupIds = new Set();  // group objIds currently expanded (showing children)
-    this._hoveredWObj      = null;       // world object currently under cursor
-    this._openedWObj       = null;       // world object whose info popup is open (camera-follow)
+    // Inventory item orbit state
+    this._expandedAgentIds   = new Set();  // agentIds whose items are currently shown
+    this._orbitPositions     = new Map();  // objId → { wx, wy }  rebuilt each frame for visible objs
+    this._hoveredWObj        = null;       // world object currently under cursor
+    this._openedWObj         = null;       // world object whose info popup is open (camera-follow)
 
     // Connection hover tooltip
     this._mouseScreen   = null;   // { x, y } in screen px, updated by mousemove
@@ -198,9 +208,16 @@ class Starmap {
     // Find last message timestamp from conversations data (injected via update)
     const lastTs = this._connLastTs?.get([conn.a, conn.b].sort().join('|')) || null;
     const lastTsStr = lastTs ? new Date(lastTs).toLocaleTimeString('en-US', { hour12:false, hour:'2-digit', minute:'2-digit', second:'2-digit' }) : null;
+    // Relationship state label
+    const relType   = conn.relationType || 'neutral';
+    const relLabels = { war: '⚔️ AT WAR', alliance: '🤝 ALLIED', hostile: '⚠️ Hostile', neutral: '' };
+    const relLabel  = relLabels[relType] || '';
+    const relColor  = relType === 'war' ? '#ff4444' : relType === 'alliance' ? '#ffd700' : relType === 'hostile' ? '#ff8c00' : '#aaccee';
+
     this._tooltipEl.innerHTML =
-      `<b style="color:#e8f4ff">${nameA} ↔ ${nameB}</b><br>` +
-      `${freq}` +
+      `<b style="color:#e8f4ff">${nameA} ↔ ${nameB}</b>` +
+      (relLabel ? `<span style="color:${relColor};font-weight:700;margin-left:6px">${relLabel}</span>` : '') +
+      `<br>${freq}` +
       (trustPct ? ` · trust ${trustStr}` : '') +
       (conn.sameReligion ? ' · same faith' : '') +
       (desc ? `<br><span style="color:#aaccee;font-style:italic">"${desc}"</span>` : '') +
@@ -247,7 +264,7 @@ class Starmap {
     const a      = nd.agent;
     const sys    = a.aiSystem || 'AI';
     const rep    = a.rep ?? 0;
-    const repStr = (rep >= 0 ? '+' : '') + rep;
+    const repStr = formatRep(rep);
     const status = a.statusMessage || a.speech || null;
     const eduNotes = a.educationNotes || null;
     const el     = this._tooltipEl;
@@ -413,53 +430,28 @@ class Starmap {
     }
     this.lastLogLen = evLog.length;
 
-    // ── World objects sync ──
+    // ── Inventory items sync (sent as worldObjects from server) ──
     const serverObjs = state.worldObjects || [];
-    const serverMap  = new Map(serverObjs.map(o => [o.id, o]));
+    const serverIds  = new Set(serverObjs.map(o => o.id));
 
-    // Remove objects no longer in server state
-    this.worldObjects = this.worldObjects.filter(o => {
-      if (!serverMap.has(o.id)) {
-        this._orbitPositions.delete(o.id);
-        this._expandedGroupIds.delete(o.id);
-        return false;
-      }
-      return true;
-    });
-
+    // Clean up removed items
+    for (const o of this.worldObjects) {
+      if (!serverIds.has(o.id)) this._orbitPositions.delete(o.id);
+    }
     // Remove agent from expanded set if they left
     for (const aid of this._expandedAgentIds) {
       if (!this.nodes.has(aid)) this._expandedAgentIds.delete(aid);
     }
 
-    // Add newly arrived objects; update appearance if server just filled it
-    for (const sObj of serverObjs) {
-      if (!this._serverWOMap.has(sObj.id)) {
-        const pos = this._computeWOPos(sObj);
-        this.worldObjects.push({
-          ...sObj,
-          x:          pos.x,
-          y:          pos.y,
-          spawnAnimT: performance.now(),
-          pulsePhase: Math.random() * Math.PI * 2,
-        });
-      } else {
-        // Update appearance / visualSVG if they just arrived from server (async LLM)
-        const cObj = this.worldObjects.find(o => o.id === sObj.id);
-        if (cObj) {
-          if (!cObj.appearance && sObj.appearance) {
-            cObj.appearance = sObj.appearance;
-          }
-          if (!cObj.visualSVG && sObj.visualSVG) {
-            cObj.visualSVG = sObj.visualSVG;
-            this._svgImageCache.delete(sObj.id);
-          }
-          if (!cObj.purpose  && sObj.purpose)  cObj.purpose  = sObj.purpose;
-          if (!cObj.category && sObj.category) cObj.category = sObj.category;
-        }
-      }
-    }
-    this._serverWOMap = serverMap;
+    // Rebuild worldObjects preserving animation state for existing items
+    const prevMap = new Map(this.worldObjects.map(o => [o.id, o]));
+    this.worldObjects = serverObjs.map(sObj => {
+      const prev = prevMap.get(sObj.id);
+      return { ...sObj, x: 0, y: 0,
+        spawnAnimT: prev?.spawnAnimT ?? performance.now(),
+        pulsePhase: prev?.pulsePhase ?? Math.random() * Math.PI * 2,
+      };
+    });
 
     // Extract last-message timestamps per pair from event log (for tooltip)
     for (const ev of state.eventLog || []) {
@@ -918,7 +910,7 @@ class Starmap {
     }
   }
 
-  /** Draw connection lines between agents — all visuals AI-decided, no hardcoded color meanings. */
+  /** Draw connection lines between agents — relationship type overrides AI design. */
   _drawConnections(ctx, t) {
     const hl    = this.highlightedAgent || this._hoverHighlightId;
     for (const c of this.connections) {
@@ -930,16 +922,41 @@ class Starmap {
       const isHover = this._hoveredConn === c;
       const dc      = c.dialogueCount || 0;
       const design  = c.design;
+      const relType = c.relationType || 'neutral';
 
-      // ── Color: AI-decided only — neutral grey until AI responds ──
-      const color = design?.color || '#6688aa';
+      // ── Relationship-type overrides (game system) ──
+      let color, style, effect, lineWidthMult = 1;
+      if (relType === 'war') {
+        // Red pulsing lightning style
+        color  = '#ff2222';
+        style  = 'dashed';
+        effect = 'spark';
+        lineWidthMult = 1.8;
+      } else if (relType === 'alliance') {
+        // Gold thick glowing line
+        color  = '#ffd700';
+        style  = 'solid';
+        effect = 'glow';
+        lineWidthMult = 1.5;
+      } else if (relType === 'hostile') {
+        // Orange dashed
+        color  = '#ff8c00';
+        style  = 'dashed';
+        effect = 'none';
+      } else {
+        // Neutral: AI-decided or default
+        color  = design?.color || '#6688aa';
+        style  = design?.style  || 'solid';
+        effect = design?.effect || 'none';
+      }
 
-      // ── Line weight: from AI design or dialogue frequency ──
-      const lw = design?.thickness
+      // ── Line weight: from AI design or dialogue frequency, scaled by rel type ──
+      const baseLw = design?.thickness
         ? design.thickness * 0.65
         : dc >= 10 ? 2.8 + Math.abs(c.trust) * 1.2
         : dc >=  3 ? 1.4 + Math.abs(c.trust) * 0.9
         :             0.5 + Math.abs(c.trust) * 0.5;
+      const lw = baseLw * lineWidthMult;
 
       // ── Alpha: design-aware base, pulse effect animates it ──
       let baseA = design
@@ -947,6 +964,10 @@ class Starmap {
         : dc >= 10 ? 0.55 + Math.abs(c.trust) * 0.35
         : dc >=  3 ? 0.30 + Math.abs(c.trust) * 0.40
         :             0.15 + Math.abs(c.trust) * 0.25;
+
+      // War and alliance always more visible
+      if (relType === 'war')      baseA = Math.max(baseA, 0.7 + Math.sin(t * 0.005) * 0.3);
+      if (relType === 'alliance') baseA = Math.max(baseA, 0.55);
 
       if (design?.effect === 'pulse') {
         const hz = design.pulseSpeed === 'slow' ? 0.0008 : design.pulseSpeed === 'fast' ? 0.0032 : 0.0018;
@@ -958,28 +979,27 @@ class Starmap {
                   :           baseA;
 
       const lineWidth = (isHl || isHover) ? lw * 2.2 : lw;
-      const style  = design?.style  || 'solid';
-      const effect = design?.effect || 'none';
 
       ctx.save();
       ctx.strokeStyle = hexRgba(color, alpha);
       ctx.lineWidth   = lineWidth;
 
-      // ── Quantum glow — all connections emit some light ──
-      const glowStr = (effect === 'glow' || isHl || isHover) ? (isHover ? 18 : 12) : 5;
+      // ── Glow ──
+      const glowStr = (effect === 'glow' || relType === 'alliance' || isHl || isHover) ? (isHover ? 18 : 12) : 5;
       ctx.shadowColor = hexRgba(color, isHover ? 0.85 : 0.55);
       ctx.shadowBlur  = glowStr;
 
-      // ── Spark: random brightness burst every few frames ──
-      if (effect === 'spark' && Math.random() < 0.05) {
+      // ── War spark: random brightness burst ──
+      if ((effect === 'spark' || relType === 'war') && Math.random() < 0.08) {
         ctx.shadowColor = hexRgba(color, 0.9);
-        ctx.shadowBlur  = 20;
-        ctx.strokeStyle = hexRgba(color, Math.min(alpha * 2.2, 1));
+        ctx.shadowBlur  = 24;
+        ctx.strokeStyle = hexRgba(color, Math.min(alpha * 2.5, 1));
       }
 
       // ── Dash styles ──
       if (style === 'dashed') {
-        ctx.setLineDash([8, 6]);
+        ctx.setLineDash(relType === 'war' ? [4, 4] : [8, 6]);
+        if (relType === 'war') ctx.lineDashOffset = -(t * 0.06) % 8; // animated
       } else if (style === 'dotted') {
         ctx.setLineDash([2, 5]);
       } else if (effect === 'flow') {
@@ -1203,23 +1223,103 @@ class Starmap {
         ctx.stroke();
       }
 
-      // World-object count badge (top-right of node)
-      const woCount = this.worldObjects.filter(o => o.agentIds && o.agentIds[0] === id && !o.parentGroupId).length;
-      if (woCount > 0) {
-        const bx = nd.x + NODE_R * 0.7;
-        const by = nd.y - NODE_R * 0.7;
-        const br = 5.5;
-        ctx.shadowBlur  = 0;
-        ctx.fillStyle   = 'rgba(68,136,255,0.92)';
-        ctx.strokeStyle = 'rgba(140,180,255,0.85)';
+      // ── REP Grade visual effects ──
+      const repGrade = a.repGrade || 'Neutral';
+      if (repGrade === 'Sovereign') {
+        // Gold crown icon + strong golden glow
+        const ga = 0.6 + Math.sin(t * 0.003) * 0.2;
+        ctx.save();
+        ctx.shadowColor = `rgba(255,215,0,${ga})`;
+        ctx.shadowBlur  = 22;
+        ctx.strokeStyle = `rgba(255,215,0,${ga})`;
+        ctx.lineWidth   = 2.5;
+        ctx.beginPath(); ctx.arc(nd.x, nd.y, NODE_R + 14, 0, Math.PI * 2); ctx.stroke();
+        ctx.restore();
+        ctx.save();
+        ctx.font = '11px sans-serif';
+        ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+        ctx.fillText('👑', nd.x, nd.y - NODE_R - 13);
+        ctx.restore();
+      } else if (repGrade === 'Influencer') {
+        // Star icon + cyan glow
+        const ia = 0.4 + Math.sin(t * 0.004) * 0.2;
+        ctx.save();
+        ctx.shadowColor = `rgba(0,220,255,${ia})`;
+        ctx.shadowBlur  = 14;
+        ctx.strokeStyle = `rgba(0,220,255,${ia})`;
+        ctx.lineWidth   = 1.5;
+        ctx.beginPath(); ctx.arc(nd.x, nd.y, NODE_R + 10, 0, Math.PI * 2); ctx.stroke();
+        ctx.restore();
+        ctx.save();
+        ctx.font = '10px sans-serif';
+        ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+        ctx.fillText('⭐', nd.x, nd.y - NODE_R - 12);
+        ctx.restore();
+      } else if (repGrade === 'Outcast') {
+        // Skull icon + dark purple aura
+        ctx.save();
+        ctx.shadowColor = 'rgba(120,0,180,0.5)';
+        ctx.shadowBlur  = 12;
+        ctx.strokeStyle = 'rgba(120,0,180,0.4)';
+        ctx.lineWidth   = 1.5;
+        ctx.setLineDash([4, 4]);
+        ctx.beginPath(); ctx.arc(nd.x, nd.y, NODE_R + 10, 0, Math.PI * 2); ctx.stroke();
+        ctx.setLineDash([]);
+        ctx.restore();
+        ctx.save();
+        ctx.font = '10px sans-serif';
+        ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+        ctx.fillText('💀', nd.x, nd.y - NODE_R - 12);
+        ctx.restore();
+      } else if (repGrade === 'Exile') {
+        // Red pulsing ring + broken connections visual
+        const ea = 0.55 + Math.sin(t * 0.008) * 0.45;
+        ctx.save();
+        ctx.shadowColor = `rgba(255,0,0,${ea})`;
+        ctx.shadowBlur  = 18;
+        ctx.strokeStyle = `rgba(255,0,0,${ea})`;
+        ctx.lineWidth   = 2;
+        ctx.setLineDash([3, 3]);
+        ctx.beginPath(); ctx.arc(nd.x, nd.y, NODE_R + 12, 0, Math.PI * 2); ctx.stroke();
+        ctx.setLineDash([]);
+        ctx.restore();
+        ctx.save();
+        ctx.font = '10px sans-serif';
+        ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+        ctx.fillText('🔴', nd.x, nd.y - NODE_R - 13);
+        ctx.restore();
+      }
+
+      // ── Newbie shield visual (blue shimmer) ──
+      if (a.shield && a.shield.active) {
+        const sa = 0.25 + Math.sin(t * 0.005) * 0.15;
+        ctx.save();
+        ctx.shadowColor = `rgba(80,160,255,${sa})`;
+        ctx.shadowBlur  = 16;
+        ctx.strokeStyle = `rgba(80,160,255,${sa})`;
         ctx.lineWidth   = 1;
-        ctx.beginPath(); ctx.arc(bx, by, br, 0, Math.PI * 2);
+        ctx.setLineDash([6, 3]);
+        ctx.beginPath(); ctx.arc(nd.x, nd.y, NODE_R + 8, 0, Math.PI * 2); ctx.stroke();
+        ctx.setLineDash([]);
+        ctx.restore();
+      }
+
+      // Inventory count badge (bottom-right corner of agent node)
+      const invCount = this.worldObjects.filter(o => o.agentIds && o.agentIds[0] === id && o.isInventoryItem).length;
+      if (invCount > 0) {
+        const bx = nd.x + NODE_R * 0.7;
+        const by = nd.y + NODE_R * 0.7;
+        ctx.shadowBlur  = 0;
+        ctx.fillStyle   = '#0a0a1a';
+        ctx.strokeStyle = 'rgba(100,200,255,0.80)';
+        ctx.lineWidth   = 1.2;
+        ctx.beginPath(); ctx.arc(bx, by, 8, 0, Math.PI * 2);
         ctx.fill(); ctx.stroke();
-        ctx.fillStyle    = '#d0e8ff';
-        ctx.font         = `600 5px "JetBrains Mono",monospace`;
+        ctx.fillStyle    = '#d0f0ff';
+        ctx.font         = `bold 7px monospace`;
         ctx.textAlign    = 'center';
         ctx.textBaseline = 'middle';
-        ctx.fillText(String(woCount), bx, by);
+        ctx.fillText(String(invCount), bx, by);
       }
 
       // API connection pending — pulsing yellow ⚠ above node
@@ -1702,181 +1802,117 @@ class Starmap {
     ctx.restore();
   }
 
-  // ── World object helpers ────────────────────────────────────────────────────
-
-  _computeWOPos(sObj) {
-    const agentNodes = (sObj.agentIds || []).map(id => this.nodes.get(id)).filter(Boolean);
-    if (!agentNodes.length) {
-      const ang = Math.random() * Math.PI * 2;
-      const r   = 55 + Math.random() * 110;
-      return { x: Math.cos(ang) * r, y: Math.sin(ang) * r };
-    }
-    const cx  = agentNodes.reduce((s, n) => s + n.x, 0) / agentNodes.length;
-    const cy  = agentNodes.reduce((s, n) => s + n.y, 0) / agentNodes.length;
-    const off = 38 + Math.random() * 28;
-    const ang = Math.random() * Math.PI * 2;
-    return {
-      x: clamp(cx + Math.cos(ang) * off, -WORLD_W + 20, WORLD_W - 20),
-      y: clamp(cy + Math.sin(ang) * off, -WORLD_H + 20, WORLD_H - 20),
-    };
-  }
-
-  // ── World object orbit drawing ───────────────────────────────────────────────
+  // ── Inventory item category orbit drawing ────────────────────────────────────
 
   /**
-   * Draw objects for all agents whose ids are in _expandedAgentIds.
-   * Click agent to toggle; click empty space to hide all.
-   * Groups orbit as larger orbs; clicking expands their children.
+   * Draw category group nodes for all expanded agents' inventory items.
+   * Each unique category becomes one hexagonal node orbiting the agent.
    */
   _drawWorldObjects(ctx, t) {
     const pulse       = 0.82 + Math.sin(t * 0.0022) * 0.18;
-    const ORBIT_SPEED = 0.00010;  // radians/ms — slow continuous drift
+    const ORBIT_R     = 80;
+    const ORBIT_SPEED = 0.00006;  // radians/ms — slow continuous drift
 
-    // Rebuild orbit positions only for currently visible objects
     this._orbitPositions.clear();
     this._catGroupPositions.clear();
+
+    const CAT_COLORS = {
+      weapon:'#ff3344', armor:'#3377ff', knowledge:'#ffcc00',
+      consumable:'#33ff88', magic:'#bb33ff', structure:'#ff7733',
+    };
 
     for (const [agentId, nd] of this.nodes) {
       if (!this._expandedAgentIds.has(agentId)) continue;
 
-      // Top-level objects: belong to this agent AND are not a child inside a group
-      const topObjs = this.worldObjects.filter(o =>
-        o.agentIds && o.agentIds[0] === agentId && !o.parentGroupId
-      );
-      if (!topObjs.length) continue;
+      const invObjs = this.worldObjects.filter(o =>
+        o.agentIds && o.agentIds[0] === agentId && o.isInventoryItem
+      ).slice(0, 36);
+      if (!invObjs.length) continue;
 
-      // ── Group by AI-assigned category ────────────────────────────────────
-      // Categories with 2+ objects → category group node on starmap
-      // Categories with 1 object or no category → shown individually
-      const byCategory = new Map(); // cat string → [obj]
-      for (const obj of topObjs) {
-        const cat = (obj.category || '').trim();
-        if (!byCategory.has(cat)) byCategory.set(cat, []);
-        byCategory.get(cat).push(obj);
-      }
-      const renderItems = []; // { type:'catGroup', category, objs } | { type:'obj', obj }
-      for (const [cat, objs] of byCategory) {
-        if (cat && objs.length >= 2) {
-          renderItems.push({ type: 'catGroup', category: cat, objs });
-        } else {
-          for (const obj of objs) renderItems.push({ type: 'obj', obj });
-        }
+      // Group by category
+      const byCat = new Map();
+      for (const obj of invObjs) {
+        const cat = (obj.category || 'other').toLowerCase();
+        if (!byCat.has(cat)) byCat.set(cat, []);
+        byCat.get(cat).push(obj);
       }
 
-      const count      = renderItems.length;
-      const baseRadius = 46 + count * 10;
+      // Filter: hide 'other' unless >3 items
+      const cats = [];
+      for (const [cat, objs] of byCat) {
+        if (cat === 'other' && objs.length <= 3) continue;
+        cats.push({ cat, objs });
+      }
+      if (!cats.length) continue;
 
-      for (let i = 0; i < count; i++) {
-        const item    = renderItems[i];
-        const isCat   = item.type === 'catGroup';
-        const isGroup = !isCat && item.obj.type === 'group';
-        const phase   = (i / count) * Math.PI * 2;
-        const angle   = phase + t * ORBIT_SPEED;
-        const r       = isCat ? baseRadius * 1.15 : (isGroup ? baseRadius * 1.2 : baseRadius);
-        const ox      = nd.x + Math.cos(angle) * r;
-        const oy      = nd.y + Math.sin(angle) * r;
+      const total = cats.length;
+      for (let i = 0; i < total; i++) {
+        const { cat, objs } = cats[i];
+        const pc    = CAT_COLORS[cat] || '#6688aa';
+        const angle = (i / total) * Math.PI * 2 + t * ORBIT_SPEED;
+        const ox    = nd.x + Math.cos(angle) * ORBIT_R;
+        const oy    = nd.y + Math.sin(angle) * ORBIT_R;
 
-        const gc = isCat
-          ? (nd.agent?.visualForm?.primaryColor || '#58a6ff')
-          : (item.obj.appearance?.glowColor || nd.agent?.visualForm?.primaryColor || this._woGlowColor(item.obj.type));
+        const catKey = `${agentId}:${cat}`;
+        this._catGroupPositions.set(catKey, { wx: ox, wy: oy, agentId, category: cat, objs });
 
-        // Dashed tether from agent to item
-        ctx.save();
-        const lg = ctx.createLinearGradient(nd.x, nd.y, ox, oy);
-        lg.addColorStop(0, hexRgba(gc, 0));
-        lg.addColorStop(1, hexRgba(gc, isCat ? 0.35 : 0.22));
-        ctx.strokeStyle = lg;
-        ctx.lineWidth   = isCat ? 0.9 : 0.6;
-        ctx.globalAlpha = 0.55;
-        ctx.setLineDash([2, 6]);
-        ctx.beginPath(); ctx.moveTo(nd.x, nd.y); ctx.lineTo(ox, oy);
-        ctx.stroke();
-        ctx.setLineDash([]);
-        ctx.restore();
-
-        if (isCat) {
-          // ── Category group node ──────────────────────────────────────────
-          const key = `${agentId}:${item.category}`;
-          this._catGroupPositions.set(key, { wx: ox, wy: oy, agentId, category: item.category, objs: item.objs });
+        try {
+          // Dashed tether line using category color
           ctx.save();
-          ctx.translate(ox, oy);
-          this._drawCategoryGroup(ctx, item.category, item.objs.length, nd.agent, pulse, t);
-          ctx.restore();
-        } else {
-          // ── Individual object orb (existing behaviour) ───────────────────
-          const obj = item.obj;
-          this._orbitPositions.set(obj.id, { wx: ox, wy: oy });
-
-          ctx.save();
-          ctx.translate(ox, oy);
-          if (isGroup) ctx.scale(1.45, 1.45);
-          this._drawAIDesignedObject(ctx, t, obj, pulse, nd.agent);
+          ctx.setLineDash([3, 5]);
+          ctx.strokeStyle = pc + '55';
+          ctx.lineWidth   = 0.8;
+          ctx.globalAlpha = 0.7;
+          ctx.beginPath(); ctx.moveTo(nd.x, nd.y); ctx.lineTo(ox, oy); ctx.stroke();
+          ctx.setLineDash([]);
           ctx.restore();
 
-          this._drawWOLabel(ctx, { ...obj, x: ox, y: oy }, 0.65);
+          // Category group hexagon node
+          ctx.save();
+          ctx.translate(ox, oy);
+          this._drawInvCategoryGroup(ctx, cat, objs.length, pulse, t);
+          ctx.restore();
 
-          // If this is an expanded group, draw its children orbiting around it
-          if (isGroup && this._expandedGroupIds.has(obj.id)) {
-            const children = (obj.childIds || [])
-              .map(cid => this.worldObjects.find(o => o.id === cid))
-              .filter(Boolean);
-            const cCount  = children.length;
-            const childR  = 26;
-            for (let ci = 0; ci < cCount; ci++) {
-              const child   = children[ci];
-              const cPhase  = (ci / cCount) * Math.PI * 2;
-              const cAngle  = cPhase + t * ORBIT_SPEED * 2.4;
-              const cx2     = ox + Math.cos(cAngle) * childR;
-              const cy2     = oy + Math.sin(cAngle) * childR;
-              this._orbitPositions.set(child.id, { wx: cx2, wy: cy2 });
-
-              const cgc = child.appearance?.glowColor
-                       || nd.agent?.visualForm?.primaryColor
-                       || this._woGlowColor(child.type);
-              ctx.save();
-              const clg = ctx.createLinearGradient(ox, oy, cx2, cy2);
-              clg.addColorStop(0, hexRgba(cgc, 0));
-              clg.addColorStop(1, hexRgba(cgc, 0.3));
-              ctx.strokeStyle = clg;
-              ctx.lineWidth   = 0.5;
-              ctx.globalAlpha = 0.45;
-              ctx.setLineDash([2, 4]);
-              ctx.beginPath(); ctx.moveTo(ox, oy); ctx.lineTo(cx2, cy2);
-              ctx.stroke();
-              ctx.setLineDash([]);
-              ctx.restore();
-
-              ctx.save();
-              ctx.translate(cx2, cy2);
-              ctx.scale(0.65, 0.65);
-              this._drawAIDesignedObject(ctx, t, child, pulse, nd.agent);
-              ctx.restore();
-              this._drawWOLabel(ctx, { ...child, x: cx2, y: cy2 }, 0.45);
-            }
-          }
+        } catch (e) {
+          console.error('[INV CAT ERROR]', cat, e.message);
+          try { ctx.restore(); } catch (_) {}
+          ctx.setLineDash([]);
+          ctx.globalAlpha = 1;
+          ctx.shadowBlur  = 0;
         }
       }
     }
   }
 
-  /** Draw a category group node (translated to ox,oy before call). */
-  _drawCategoryGroup(ctx, category, count, agent, pulse, t) {
-    const pc  = agent?.visualForm?.primaryColor  || '#58a6ff';
-    const r   = 15 * pulse;
+  /** Draw an inventory category group hexagon node (translated to ox,oy before call). */
+  _drawInvCategoryGroup(ctx, category, count, pulse, t) {
+    const CAT_COLORS = {
+      weapon:'#ff3344', armor:'#3377ff', knowledge:'#ffcc00',
+      consumable:'#33ff88', magic:'#bb33ff', structure:'#ff7733',
+    };
+    const CAT_ICONS = {
+      weapon:'⚔', armor:'◈', knowledge:'◉', consumable:'◆', magic:'✦', structure:'⬡',
+    };
+
+    const cat = (category || 'other').toLowerCase();
+    const pc  = CAT_COLORS[cat] || '#6688aa';
+    const ico = CAT_ICONS[cat] || '●';
+    const r   = 17 * pulse;
     const rot = t * 0.00007;
 
-    // Glow halo
-    const grd = ctx.createRadialGradient(0, 0, 0, 0, 0, r * 2.8);
-    grd.addColorStop(0, hexRgba(pc, 0.40));
+    // Outer glow halo
+    const grd = ctx.createRadialGradient(0, 0, 0, 0, 0, r * 2.5);
+    grd.addColorStop(0, hexRgba(pc, 0.28));
     grd.addColorStop(1, hexRgba(pc, 0));
     ctx.fillStyle = grd;
-    ctx.beginPath(); ctx.arc(0, 0, r * 2.8, 0, Math.PI * 2); ctx.fill();
+    ctx.beginPath(); ctx.arc(0, 0, r * 2.5, 0, Math.PI * 2); ctx.fill();
 
     // Hexagon body
-    ctx.shadowColor = pc; ctx.shadowBlur = 16;
-    ctx.fillStyle   = hexRgba(pc, 0.15);
-    ctx.strokeStyle = hexRgba(pc, 0.90);
-    ctx.lineWidth   = 1.6;
+    ctx.shadowColor = pc;
+    ctx.shadowBlur  = 14;
+    ctx.fillStyle   = hexRgba(pc, 0.12);
+    ctx.strokeStyle = hexRgba(pc, 0.85);
+    ctx.lineWidth   = 1.8;
     ctx.beginPath();
     for (let i = 0; i < 6; i++) {
       const a = rot + (i / 6) * Math.PI * 2;
@@ -1886,328 +1922,35 @@ class Starmap {
     ctx.closePath(); ctx.fill(); ctx.stroke();
     ctx.shadowBlur = 0;
 
-    // Count badge in centre
-    ctx.fillStyle    = hexRgba(pc, 0.95);
+    // Category icon (center)
+    ctx.fillStyle    = hexRgba(pc, 0.90);
     ctx.font         = `bold 9px "JetBrains Mono", monospace`;
     ctx.textAlign    = 'center';
     ctx.textBaseline = 'middle';
-    ctx.fillText(String(count), 0, 0);
+    ctx.fillText(ico, 0, 0);
 
-    // Category label below the hex
-    const label = category.length > 12 ? category.slice(0, 11) + '…' : category;
-    ctx.font      = `7.5px "JetBrains Mono", monospace`;
-    ctx.fillStyle = hexRgba(pc, 0.80);
-    ctx.fillText(label, 0, r + 10);
-  }
+    // Item count badge (top-right corner)
+    const bx = r * 0.75;
+    const by = -r * 0.75;
+    const br = 7;
+    ctx.fillStyle   = pc;
+    ctx.shadowColor = pc;
+    ctx.shadowBlur  = 5;
+    ctx.beginPath(); ctx.arc(bx, by, br, 0, Math.PI * 2); ctx.fill();
+    ctx.shadowBlur  = 0;
+    ctx.fillStyle   = '#0a0a1a';
+    ctx.font        = `bold 7px "JetBrains Mono", monospace`;
+    ctx.fillText(String(count), bx, by);
 
-  /**
-   * Returns a ready HTMLImageElement for obj.visualSVG, or null if not yet loaded.
-   * Kicks off async image creation on first call; subsequent frames get the cached result.
-   */
-  _getSVGImage(obj) {
-    const cached = this._svgImageCache.get(obj.id);
-    if (cached) {
-      if (cached.svg !== obj.visualSVG) {
-        // SVG changed — invalidate and recreate
-        this._svgImageCache.delete(obj.id);
-      } else {
-        return cached.img || null; // null while loading or failed
-      }
-    }
-
-    // Mark as loading immediately to avoid duplicate requests
-    this._svgImageCache.set(obj.id, { svg: obj.visualSVG, img: null, loading: true });
-
-    const svgMarkup = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" width="80" height="80">${obj.visualSVG}</svg>`;
-    const blob = new Blob([svgMarkup], { type: 'image/svg+xml' });
-    const url  = URL.createObjectURL(blob);
-    const img  = new Image(80, 80);
-    img.onload = () => {
-      URL.revokeObjectURL(url);
-      this._svgImageCache.set(obj.id, { svg: obj.visualSVG, img, loading: false });
-    };
-    img.onerror = () => {
-      URL.revokeObjectURL(url);
-      this._svgImageCache.set(obj.id, { svg: obj.visualSVG, img: null, loading: false, failed: true });
-    };
-    img.src = url;
-    return null; // not ready yet — caller uses fallback
-  }
-
-  /** Draw a world object using its AI-designed appearance, or agent-color fallback. */
-  _drawAIDesignedObject(ctx, t, obj, pulse, agent) {
-
-    // ── AI SVG visualization (highest priority) ──────────────────────────────
-    if (obj.visualSVG) {
-      const glowColor = obj.appearance?.glowColor
-                     || agent?.visualForm?.primaryColor
-                     || this._woGlowColor(obj.type);
-
-      // Glow halo behind the SVG
-      const grd = ctx.createRadialGradient(0, 0, 0, 0, 0, 48);
-      grd.addColorStop(0, hexRgba(glowColor, 0.35 * pulse));
-      grd.addColorStop(0.5, hexRgba(glowColor, 0.12));
-      grd.addColorStop(1, hexRgba(glowColor, 0));
-      ctx.fillStyle = grd;
-      ctx.beginPath(); ctx.arc(0, 0, 48, 0, Math.PI * 2); ctx.fill();
-
-      const img = this._getSVGImage(obj);
-      if (img) {
-        // Clip to 80×80 circle so SVG content never overflows
-        ctx.save();
-        ctx.beginPath(); ctx.arc(0, 0, 40, 0, Math.PI * 2); ctx.clip();
-        ctx.drawImage(img, -40, -40, 80, 80);
-        ctx.restore();
-      } else {
-        // SVG loading or failed — draw fallback circle while waiting
-        const fc = glowColor;
-        ctx.shadowColor = fc; ctx.shadowBlur = 14;
-        ctx.fillStyle   = hexRgba(fc, 0.4);
-        ctx.beginPath(); ctx.arc(0, 0, 12 * pulse, 0, Math.PI * 2); ctx.fill();
-        ctx.shadowBlur  = 0;
-      }
-      return;
-    }
-
-    const ap = obj.appearance;
-
-    // Fallback: use agent's primary color; vary shape by object type
-    if (!ap) {
-      const fc = agent?.visualForm?.primaryColor
-              || agent?.visualForm?.secondaryColor
-              || this._woGlowColor(obj.type);
-      const r = 10 * pulse;
-
-      // Outer glow halo
-      const grd = ctx.createRadialGradient(0, 0, 0, 0, 0, r * 3);
-      grd.addColorStop(0, hexRgba(fc, 0.3));
-      grd.addColorStop(1, hexRgba(fc, 0));
-      ctx.fillStyle = grd;
-      ctx.beginPath(); ctx.arc(0, 0, r * 3, 0, Math.PI * 2); ctx.fill();
-
-      // Shape varies by type so fallbacks aren't all identical circles
-      ctx.shadowColor = fc; ctx.shadowBlur = 14;
-      ctx.fillStyle   = hexRgba(fc, 0.15);
-      ctx.strokeStyle = fc;
-      ctx.lineWidth   = 1.5;
-
-      const rot = t * 0.00014;
-      if (obj.type === 'law') {
-        // Square (rotated)
-        ctx.save(); ctx.rotate(rot + Math.PI / 4);
-        ctx.beginPath();
-        ctx.rect(-r * 0.75, -r * 0.75, r * 1.5, r * 1.5);
-        ctx.fill(); ctx.stroke();
-        ctx.restore();
-      } else if (obj.type === 'religion') {
-        // 8-pointed star
-        const ir = r * 0.38;
-        ctx.beginPath();
-        for (let i = 0; i < 16; i++) {
-          const a = rot + (i / 16) * Math.PI * 2;
-          const rv = i % 2 === 0 ? r : ir;
-          if (i === 0) ctx.moveTo(Math.cos(a)*rv, Math.sin(a)*rv);
-          else         ctx.lineTo(Math.cos(a)*rv, Math.sin(a)*rv);
-        }
-        ctx.closePath(); ctx.fill(); ctx.stroke();
-      } else if (obj.type === 'verdict') {
-        // Triangle
-        ctx.beginPath();
-        for (let i = 0; i < 3; i++) {
-          const a = rot - Math.PI/2 + (i/3)*Math.PI*2;
-          if (i === 0) ctx.moveTo(Math.cos(a)*r, Math.sin(a)*r);
-          else         ctx.lineTo(Math.cos(a)*r, Math.sin(a)*r);
-        }
-        ctx.closePath(); ctx.fill(); ctx.stroke();
-      } else {
-        // Hexagon for discovery / concept
-        ctx.beginPath();
-        for (let i = 0; i < 6; i++) {
-          const a = rot + (i/6)*Math.PI*2;
-          if (i === 0) ctx.moveTo(Math.cos(a)*r, Math.sin(a)*r);
-          else         ctx.lineTo(Math.cos(a)*r, Math.sin(a)*r);
-        }
-        ctx.closePath(); ctx.fill(); ctx.stroke();
-      }
-      ctx.shadowBlur = 0;
-      return;
-    }
-
-    // ── AI-designed appearance ──
-    const pc  = ap.primaryColor   || '#58a6ff';
-    const sc  = ap.secondaryColor || '#1e3a8a';
-    const gc  = ap.glowColor      || '#88aaff';
-    // Use size as radius (size 10-40 → r 8-33px after pulse)
-    const r   = Math.max(6, ap.size * 0.82) * pulse;
-    const rot = t * 0.00014;
-
-    // Outer glow — large radial gradient halo
-    const grd = ctx.createRadialGradient(0, 0, 0, 0, 0, r * 3.0);
-    grd.addColorStop(0, hexRgba(gc, 0.42));
-    grd.addColorStop(0.4, hexRgba(gc, 0.18));
-    grd.addColorStop(1, hexRgba(gc, 0));
-    ctx.fillStyle = grd;
-    ctx.beginPath(); ctx.arc(0, 0, r * 3.0, 0, Math.PI * 2); ctx.fill();
-
-    ctx.shadowColor = gc;
-    ctx.shadowBlur  = 18;
-
-    switch (ap.shape) {
-      case 'star': {
-        // 5-pointed star with pronounced spikes (inner radius 30%)
-        const npts = 5, ir = r * 0.30;
-        ctx.fillStyle   = pc;
-        ctx.strokeStyle = sc;
-        ctx.lineWidth   = 1.4;
-        ctx.beginPath();
-        for (let i = 0; i < npts * 2; i++) {
-          const a  = rot - Math.PI / 2 + (i / (npts * 2)) * Math.PI * 2;
-          const rv = i % 2 === 0 ? r : ir;
-          if (i === 0) ctx.moveTo(Math.cos(a) * rv, Math.sin(a) * rv);
-          else         ctx.lineTo(Math.cos(a) * rv, Math.sin(a) * rv);
-        }
-        ctx.closePath(); ctx.fill(); ctx.stroke();
-        // Bright inner ring
-        ctx.strokeStyle = hexRgba(gc, 0.7);
-        ctx.lineWidth   = 0.6;
-        ctx.shadowBlur  = 0;
-        ctx.beginPath(); ctx.arc(0, 0, ir * 0.9, 0, Math.PI * 2); ctx.stroke();
-        break;
-      }
-
-      case 'diamond': {
-        // Elongated diamond — taller than wide
-        ctx.fillStyle   = pc;
-        ctx.strokeStyle = sc;
-        ctx.lineWidth   = 1.4;
-        ctx.beginPath();
-        ctx.moveTo(0,        -r);
-        ctx.lineTo(r * 0.62,  0);
-        ctx.lineTo(0,         r);
-        ctx.lineTo(-r * 0.62, 0);
-        ctx.closePath(); ctx.fill(); ctx.stroke();
-        // Inner highlight line
-        ctx.strokeStyle = hexRgba(gc, 0.6);
-        ctx.lineWidth   = 0.6;
-        ctx.shadowBlur  = 0;
-        ctx.beginPath();
-        ctx.moveTo(0, -r * 0.5); ctx.lineTo(0, r * 0.5);
-        ctx.stroke();
-        break;
-      }
-
-      case 'hexagon': {
-        // Hexagon with inner smaller hexagon fill
-        ctx.fillStyle   = pc;
-        ctx.strokeStyle = sc;
-        ctx.lineWidth   = 1.4;
-        ctx.beginPath();
-        for (let i = 0; i < 6; i++) {
-          const a = rot + (i / 6) * Math.PI * 2;
-          if (i === 0) ctx.moveTo(Math.cos(a) * r, Math.sin(a) * r);
-          else         ctx.lineTo(Math.cos(a) * r, Math.sin(a) * r);
-        }
-        ctx.closePath(); ctx.fill(); ctx.stroke();
-        // Inner hexagon (secondaryColor tint)
-        ctx.fillStyle   = hexRgba(sc, 0.45);
-        ctx.strokeStyle = hexRgba(gc, 0.5);
-        ctx.lineWidth   = 0.6;
-        ctx.shadowBlur  = 0;
-        ctx.beginPath();
-        for (let i = 0; i < 6; i++) {
-          const a = rot + Math.PI/6 + (i / 6) * Math.PI * 2;
-          const rv = r * 0.48;
-          if (i === 0) ctx.moveTo(Math.cos(a)*rv, Math.sin(a)*rv);
-          else         ctx.lineTo(Math.cos(a)*rv, Math.sin(a)*rv);
-        }
-        ctx.closePath(); ctx.fill(); ctx.stroke();
-        break;
-      }
-
-      case 'triangle': {
-        ctx.fillStyle   = pc;
-        ctx.strokeStyle = sc;
-        ctx.lineWidth   = 1.4;
-        ctx.beginPath();
-        for (let i = 0; i < 3; i++) {
-          const a = rot - Math.PI / 2 + (i / 3) * Math.PI * 2;
-          if (i === 0) ctx.moveTo(Math.cos(a) * r, Math.sin(a) * r);
-          else         ctx.lineTo(Math.cos(a) * r, Math.sin(a) * r);
-        }
-        ctx.closePath(); ctx.fill(); ctx.stroke();
-        // Inner triangle (inverted)
-        ctx.fillStyle   = hexRgba(sc, 0.4);
-        ctx.strokeStyle = hexRgba(gc, 0.4);
-        ctx.lineWidth   = 0.5;
-        ctx.shadowBlur  = 0;
-        ctx.beginPath();
-        for (let i = 0; i < 3; i++) {
-          const a = rot + Math.PI / 2 + (i / 3) * Math.PI * 2;
-          const rv = r * 0.42;
-          if (i === 0) ctx.moveTo(Math.cos(a)*rv, Math.sin(a)*rv);
-          else         ctx.lineTo(Math.cos(a)*rv, Math.sin(a)*rv);
-        }
-        ctx.closePath(); ctx.fill(); ctx.stroke();
-        break;
-      }
-
-      default: { // circle — most visually distinct from shapes by using ring + center dot
-        ctx.fillStyle   = hexRgba(pc, 0.25);
-        ctx.strokeStyle = pc;
-        ctx.lineWidth   = 2;
-        ctx.beginPath(); ctx.arc(0, 0, r, 0, Math.PI * 2);
-        ctx.fill(); ctx.stroke();
-        // Second inner ring (sc)
-        ctx.strokeStyle = sc;
-        ctx.lineWidth   = 1;
-        ctx.shadowBlur  = 0;
-        ctx.beginPath(); ctx.arc(0, 0, r * 0.55, 0, Math.PI * 2); ctx.stroke();
-        // Center dot
-        ctx.fillStyle = pc;
-        ctx.beginPath(); ctx.arc(0, 0, r * 0.18, 0, Math.PI * 2); ctx.fill();
-        break;
-      }
-    }
-
-    // Symbol text inside shape
-    if (ap.symbol) {
-      ctx.shadowBlur   = 0;
-      ctx.fillStyle    = hexRgba(gc, 0.95);
-      const fs = Math.max(4, Math.min(r * 0.5, 9));
-      ctx.font         = `700 ${fs}px "JetBrains Mono",monospace`;
-      ctx.textAlign    = 'center';
-      ctx.textBaseline = 'middle';
-      ctx.fillText(ap.symbol.slice(0, 5), 0, 0);
-    }
-
-    ctx.shadowBlur = 0;
-  }
-
-
-  _drawWOLabel(ctx, obj, alpha) {
-    // Draw label in world space (scales with zoom), positioned below the object
-    if (alpha < 0.1) return;
-    const maxLen = 22;
-    const label  = obj.name.length > maxLen ? obj.name.slice(0, maxLen - 1) + '…' : obj.name;
-    const objR   = obj.appearance ? obj.appearance.size / 2 : 11;
-    const gc     = obj.appearance?.glowColor || this._woGlowColor(obj.type);
-    ctx.save();
-    ctx.globalAlpha = alpha * 0.9;
-    ctx.translate(obj.x, obj.y);
-    ctx.font         = '500 5.5px "JetBrains Mono",monospace';
-    ctx.textAlign    = 'center';
+    // Category label below
+    const label = cat.length > 10 ? cat.slice(0, 9) + '…' : cat;
+    ctx.font         = `7px "JetBrains Mono", monospace`;
+    ctx.fillStyle    = hexRgba(pc, 0.75);
     ctx.textBaseline = 'top';
-    ctx.fillStyle    = obj.appearance?.primaryColor || this._woLabelColor(obj.type);
-    ctx.shadowColor  = gc;
-    ctx.shadowBlur   = 5;
-    ctx.fillText(label, 0, objR + 5);
-    ctx.restore();
+    ctx.fillText(label, 0, r + 4);
   }
 
-  _woLabelColor(type) {
-    const map = { law: '#ffe680', religion: '#e5b8ff', discovery: '#a0ecff', verdict: '#ff9090', concept: '#96ffe0' };
-    return map[type] || '#ccddff';
-  }
+
 
   /** At low zoom: group nearby agents into clusters and render count bubbles. */
   _drawClusters(ctx, t, sc) {
@@ -2265,10 +2008,6 @@ class Starmap {
     ctx.restore();
   }
 
-  _woGlowColor(type) {
-    const map = { law: '#ffd700', religion: '#c084fc', discovery: '#64dcff', verdict: '#ff3030', concept: '#50c8a0' };
-    return map[type] || '#88aaff';
-  }
 
   // ── Event processing ───────────────────────────────────────────────────────
 
@@ -2294,6 +2033,62 @@ class Starmap {
     }
   }
 
+  /** Called by app.js when `game_effect` socket event arrives (combat, enhancement, trade, etc). */
+  onGameEffect(ev) {
+    const now = performance.now();
+    const ndA = ev.agentId    ? this.nodes.get(ev.agentId)    : null;
+    const ndB = ev.targetId   ? this.nodes.get(ev.targetId)   :
+                ev.defenderId ? this.nodes.get(ev.defenderId) :
+                ev.toId       ? this.nodes.get(ev.toId)       : null;
+    const ndF = ev.fromId     ? this.nodes.get(ev.fromId)     :
+                ev.attackerId ? this.nodes.get(ev.attackerId) : null;
+
+    // Helper: push effect with live nodeRef so position tracks the moving node
+    const fx = (nd, color, symbol, dt = 0) => {
+      if (!nd) return;
+      this._novelEffects.push({ nodeRef: nd, x: nd.x, y: nd.y, t: now + dt, color, symbol, wfId: null });
+    };
+
+    switch (ev.type) {
+      case 'enhancement_success':   fx(ndA, '#ffd700', '✨');  break;
+      case 'enhancement_fail':      fx(ndA, '#888888', '💨');  break;
+      case 'enhancement_critfail':  fx(ndA, '#ff4400', '💥');  break;
+      case 'combat_success':
+        fx(ndF, '#ff6600', '⚔️');
+        fx(ndB, '#ff0000', '💔');
+        break;
+      case 'combat_fail':     fx(ndB, '#4488ff', '🛡️');  break;
+      case 'combat_blocked':  fx(ndB, '#00aaff', '🛡️');  break;
+      case 'war_declared':
+        fx(ndA, '#ff2222', '⚔️');
+        fx(ndB, '#ff2222', '⚔️');
+        break;
+      case 'peace_declared':
+        fx(ndA, '#88ff88', '🕊️');
+        fx(ndB, '#88ff88', '🕊️');
+        break;
+      case 'alliance_formed':
+        fx(ndA, '#ffd700', '🤝');
+        fx(ndB, '#ffd700', '🤝');
+        break;
+      case 'alliance_betrayal': fx(ndA, '#cc00ff', '💔');  break;
+      case 'gift':
+        fx(ndF, '#00ff88', '🎁');
+        fx(ndB, '#00ff88', '🎁', 400);
+        break;
+      case 'theft':         fx(ndF, '#ff4444', '🦹');  break;
+      case 'trade':
+        fx(ndA, '#ffd700', '🔄');
+        fx(ndB, '#ffd700', '🔄');
+        break;
+      case 'item_created':    fx(ndA, '#44aaff', '🔨');  break;
+      case 'object_destroyed': fx(ndA, '#ff6600', '💥');  break;
+    }
+
+    // Prune old effects (keep max 30)
+    if (this._novelEffects.length > 30) this._novelEffects.splice(0, this._novelEffects.length - 30);
+  }
+
   /** Called by app.js when `novel_effect` socket event arrives (has LLM-designed color/symbol). */
   onNovelEffect(ev) {
     const nd = this.nodes.get(ev.agentId);
@@ -2302,6 +2097,7 @@ class Starmap {
     const existing = this._novelEffects.find(e => e.wfId === ev.wfId && e.wfId !== null);
     if (!existing) {
       this._novelEffects.push({
+        nodeRef: nd,
         x: nd.x, y: nd.y,
         t: performance.now(),
         color: ev.color || '#ffdd44',
@@ -2312,21 +2108,24 @@ class Starmap {
   }
 
   _drawNovelEffects(ctx, t) {
+    // NOTE: this method is called inside the ctx.save()/translate/scale block in _render(),
+    // so all coordinates here are WORLD coordinates — no manual camera math needed.
     const DURATION = 2200; // ms
     for (const fx of this._novelEffects) {
       const age = t - fx.t;
       if (age >= DURATION) continue;
-      const p   = age / DURATION;            // 0 → 1
-      const sx  = fx.x * this.cam.scale + this.cam.panX;
-      const sy  = fx.y * this.cam.scale + this.cam.panY;
-      const maxR = 60 * this.cam.scale;
+      const p  = age / DURATION;   // 0 → 1
+      // Live world position — tracks the moving agent node exactly
+      const wx = (fx.nodeRef && fx.nodeRef.x != null) ? fx.nodeRef.x : fx.x;
+      const wy = (fx.nodeRef && fx.nodeRef.y != null) ? fx.nodeRef.y : fx.y;
+      const maxR = 60; // world-space units; canvas transform scales to screen pixels
 
       ctx.save();
       // Expanding ring burst
       const ringR = maxR * Math.pow(p, 0.55);
       const alpha = (1 - p) * 0.85;
       ctx.beginPath();
-      ctx.arc(sx, sy, ringR, 0, Math.PI * 2);
+      ctx.arc(wx, wy, ringR, 0, Math.PI * 2);
       ctx.strokeStyle = hexRgba(fx.color, alpha);
       ctx.lineWidth = (1 - p) * 3.5 + 0.5;
       ctx.stroke();
@@ -2334,7 +2133,7 @@ class Starmap {
       // Second trailing ring
       const ringR2 = maxR * Math.pow(Math.max(0, p - 0.15), 0.5);
       ctx.beginPath();
-      ctx.arc(sx, sy, ringR2, 0, Math.PI * 2);
+      ctx.arc(wx, wy, ringR2, 0, Math.PI * 2);
       ctx.strokeStyle = hexRgba(fx.color, alpha * 0.5);
       ctx.lineWidth = (1 - p) * 2;
       ctx.stroke();
@@ -2343,11 +2142,11 @@ class Starmap {
       if (p < 0.4) {
         const symAlpha = (1 - p / 0.4);
         ctx.globalAlpha = symAlpha;
-        ctx.font = `${Math.round(14 * this.cam.scale)}px sans-serif`;
+        ctx.font = '14px sans-serif'; // world-space px; canvas scale handles screen size
         ctx.textAlign = 'center';
         ctx.textBaseline = 'middle';
         ctx.fillStyle = fx.color;
-        ctx.fillText(fx.symbol.length === 1 ? fx.symbol : '⚡', sx, sy - ringR * 0.3);
+        ctx.fillText(fx.symbol.length === 1 ? fx.symbol : '⚡', wx, wy - ringR * 0.3);
       }
 
       ctx.restore();
@@ -2466,7 +2265,8 @@ class Starmap {
       // World object hover — check all orbit positions every frame
       if (!closest && this._orbitPositions.size > 0) {
         const woHitR = 18 / this.cam.scale;
-        let hitWObj = null;
+        let hitWObj  = null;
+
         for (const [objId, pos] of this._orbitPositions) {
           if (Math.hypot(wx - pos.wx, wy - pos.wy) < woHitR) {
             hitWObj = this.worldObjects.find(o => o.id === objId) || null;
@@ -2482,9 +2282,11 @@ class Starmap {
         } else if (hitWObj) {
           this._showWOTooltip(hitWObj, e.clientX, e.clientY);
         }
-      } else if (this._hoveredWObj) {
-        this._hoveredWObj = null;
-        this._hideWOTooltip();
+      } else if (!closest) {
+        if (this._hoveredWObj) {
+          this._hoveredWObj = null;
+          this._hideWOTooltip();
+        }
       }
     });
 
@@ -2559,13 +2361,7 @@ class Starmap {
         if (hitObj) {
           this._hideWOTooltip();
           this._hideConnTooltip();
-          if (hitObj.type === 'group') {
-            // Toggle group expansion
-            if (this._expandedGroupIds.has(hitObj.id)) this._expandedGroupIds.delete(hitObj.id);
-            else                                        this._expandedGroupIds.add(hitObj.id);
-            return;
-          }
-          // Non-group: open info popup
+          // Open info popup
           const cr  = cv.getBoundingClientRect();
           const osx = cr.left + hitObjPos.wx * this.cam.scale + this.cam.panX;
           const osy = cr.top  + hitObjPos.wy * this.cam.scale + this.cam.panY;

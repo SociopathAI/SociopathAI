@@ -434,6 +434,33 @@ socket.on('novel_effect', ev => {
   if (starmapInstance) starmapInstance.onNovelEffect(ev);
 });
 
+socket.on('game_effect', ev => {
+  if (starmapInstance) starmapInstance.onGameEffect(ev);
+});
+
+socket.on('event_svg', ev => {
+  _showEventSVGOverlay(ev);
+});
+
+function _showEventSVGOverlay(ev) {
+  const container = document.getElementById('event-svg-overlay');
+  if (!container) return;
+  const wrap = document.createElement('div');
+  wrap.className = 'event-svg-card';
+  wrap.innerHTML = `
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" width="80" height="80">${ev.svgContent}</svg>
+    <div class="event-svg-label">${(ev.msg || '').replace(/</g,'&lt;').replace(/>/g,'&gt;').slice(0,80)}</div>
+  `;
+  container.appendChild(wrap);
+  // Fade in
+  requestAnimationFrame(() => wrap.classList.add('visible'));
+  // Remove after duration
+  setTimeout(() => {
+    wrap.classList.remove('visible');
+    setTimeout(() => { if (wrap.parentNode) wrap.parentNode.removeChild(wrap); }, 600);
+  }, ev.duration || 8000);
+}
+
 socket.on('collapse', record => {
   lastState = lastState || {};
   collapseVisible = true;
@@ -525,13 +552,62 @@ function _badgeSig(badges) {
   return (badges || []).map(b => (b.id || b.name || '') + ':' + (b.trigger || '')).join('|');
 }
 
+/** Format REP number with k/M/B suffix */
+function formatRep(rep) {
+  const sign = rep >= 0 ? '+' : '-';
+  const abs  = Math.abs(rep);
+  if (abs >= 1e9)  return sign + (abs / 1e9).toFixed(1).replace(/\.0$/, '') + 'B';
+  if (abs >= 1e6)  return sign + (abs / 1e6).toFixed(1).replace(/\.0$/, '') + 'M';
+  if (abs >= 1e5)  return sign + Math.round(abs / 1e3) + 'k';
+  if (abs >= 1e4)  return sign + Math.round(abs / 1e3) + 'k';
+  if (abs >= 1e3)  return sign + (abs / 1e3).toFixed(1).replace(/\.0$/, '') + 'k';
+  return sign + abs;
+}
+
 /** Format "Lv.2 REP +450" or "REP -7" */
 function _repLabel(agent) {
-  const rep   = agent.rep      ?? 0;
-  const level = agent.repLevel ?? 0;
-  const sign  = rep >= 0 ? '+' : '';
+  const rep    = agent.rep      ?? 0;
+  const level  = agent.repLevel ?? 0;
   const lvPart = level !== 0 ? `Lv.${level} ` : '';
-  return `${lvPart}REP ${sign}${rep}`;
+  return `${lvPart}REP ${formatRep(rep)}`;
+}
+
+/** REP grade badge HTML */
+const REP_GRADE_META = {
+  Sovereign:  { icon: '👑', cls: 'grade-sovereign'  },
+  Influencer: { icon: '⭐', cls: 'grade-influencer' },
+  Neutral:    { icon: '',   cls: 'grade-neutral'     },
+  Outcast:    { icon: '💀', cls: 'grade-outcast'     },
+  Exile:      { icon: '🔴', cls: 'grade-exile'       },
+};
+function _repGradeBadge(agent) {
+  const grade = agent.repGrade || 'Neutral';
+  const meta  = REP_GRADE_META[grade] || REP_GRADE_META.Neutral;
+  if (grade === 'Neutral') return '';
+  return `<span class="rep-grade-badge ${meta.cls}" title="${grade}">${meta.icon} ${grade}</span>`;
+}
+
+/** Shield timer HTML */
+function _shieldBadge(agent) {
+  const sh = agent.shield;
+  if (!sh || !sh.active) return '';
+  const h = Math.floor(sh.remainingMs / 3600000);
+  const m = Math.floor((sh.remainingMs % 3600000) / 60000);
+  const timeStr = h > 0 ? `${h}h ${m}m` : `${m}m`;
+  const pct = sh.reductionPct;
+  return `<span class="shield-badge" title="Newbie shield: ${pct}% damage blocked, ${timeStr} left">🛡️ ${timeStr}</span>`;
+}
+
+/** War/Alliance state HTML */
+function _warAllianceBadge(agent) {
+  const parts = [];
+  if ((agent.warTargets || []).length > 0) {
+    parts.push(`<span class="war-badge" title="At war with ${agent.warTargets.length} agent(s)">⚔️ WAR</span>`);
+  }
+  if ((agent.allianceTargets || []).length > 0) {
+    parts.push(`<span class="alliance-badge" title="Allied with ${agent.allianceTargets.length} agent(s)">🤝 ALLY</span>`);
+  }
+  return parts.join('');
 }
 
 function _buildAliveCard(agent, rank) {
@@ -550,6 +626,10 @@ function _buildAliveCard(agent, rank) {
       ? `<span class="llm-dot active" title="LLM-driven">&#9679; AI</span>`
       : `<span class="llm-dot inactive" title="No key">&#9675; algo</span>`);
 
+  const gradeBadge = _repGradeBadge(agent);
+  const shieldBadge = _shieldBadge(agent);
+  const warAllyBadge = _warAllianceBadge(agent);
+
   return `
   <div class="agent-card${isLocating ? ' locating' : ''}" data-agent-id="${esc(agent.id)}">
     <div class="agent-top">
@@ -562,6 +642,7 @@ function _buildAliveCard(agent, rank) {
           ${llmDot}
         </div>
         ${agent.nickname ? `<span class="agent-nickname">"${esc(agent.nickname)}"</span>` : ''}
+        <div class="agent-game-badges" data-stat="game-badges">${gradeBadge}${shieldBadge}${warAllyBadge}</div>
       </div>
       <div class="agent-right">
         <span class="rep-badge${(agent.rep || 0) < 0 ? ' rep-neg' : ''}" data-stat="rep">${_repLabel(agent)}</span>
@@ -644,6 +725,12 @@ function _patchAliveCard(el, agent, rank) {
         llmEl.className = 'llm-dot inactive'; llmEl.title = 'No key'; llmEl.innerHTML = '&#9675; algo';
       }
     }
+  }
+
+  // Game badges (grade, shield, war/alliance)
+  const gameBadgesEl = q('[data-stat="game-badges"]');
+  if (gameBadgesEl) {
+    gameBadgesEl.innerHTML = _repGradeBadge(agent) + _shieldBadge(agent) + _warAllianceBadge(agent);
   }
 
   // Locating highlight
@@ -983,6 +1070,62 @@ function enterFocusMode(agentId) {
     }
   }
 
+  // Show inventory — grouped by type, same row style as cat-panel world objects
+  const invPanel = document.getElementById('focus-inventory');
+  if (invPanel) {
+    const inv = agent?.inventory || [];
+    const INV_EMOJI  = { weapon:'⚔️', armor:'🛡️', knowledge:'📜', structure:'🏛️', consumable:'💊', magic:'🔮', unknown:'🔵' };
+    const INV_STARS  = { 1:'★', 2:'★★', 3:'★★★' };
+    const INV_EFFECT = {
+      weapon:'Attacks are powerful and sharp', armor:'More resilient to threats',
+      knowledge:'Words carry persuasive weight', structure:'Has a stronghold that draws others',
+      consumable:'A consumable item ready for use', magic:'Unpredictable magical power',
+      unknown:'An item of unknown power',
+    };
+    const INV_TYPE_ORDER = ['weapon','armor','knowledge','structure','consumable','magic','unknown'];
+
+    if (inv.length === 0) {
+      invPanel.innerHTML = '<div style="font-size:9px;color:#4a6080;padding:5px 4px">🎒 No items</div>';
+    } else {
+      // Group items by type
+      const grouped = {};
+      for (const o of inv) {
+        const t = o.type || 'unknown';
+        if (!grouped[t]) grouped[t] = [];
+        grouped[t].push(o);
+      }
+
+      invPanel.innerHTML = INV_TYPE_ORDER
+        .filter(t => grouped[t])
+        .map(t => {
+          const items  = grouped[t];
+          const emoji  = INV_EMOJI[t];
+          const effect = INV_EFFECT[t];
+          const label  = t.charAt(0).toUpperCase() + t.slice(1);
+
+          const rows = items.map(o => {
+            const stars = INV_STARS[o.grade] || INV_STARS[1];
+            return `<div class="cat-obj-row" style="display:flex;gap:10px;align-items:flex-start;padding:6px 6px;border-radius:8px;border-bottom:1px solid rgba(80,130,200,0.10);margin-bottom:2px">
+              <div style="width:28px;height:28px;border-radius:50%;background:rgba(80,130,200,0.18);flex-shrink:0;display:flex;align-items:center;justify-content:center;font-size:13px">${emoji}</div>
+              <div style="min-width:0">
+                <div style="font-size:10px;font-weight:700;color:#c8d8f0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${stars} ${esc(o.name)}</div>
+                <div style="font-size:8.5px;color:#7090b0;margin-top:2px;line-height:1.4">${esc(effect)}</div>
+              </div>
+            </div>`;
+          }).join('');
+
+          return `<details style="margin-bottom:3px">
+            <summary style="display:flex;align-items:center;justify-content:space-between;padding:5px 4px;cursor:pointer;list-style:none;font-size:10px;font-weight:700;color:#58a6ff;letter-spacing:0.05em">
+              <span>${emoji} ${label}</span>
+              <span style="font-size:9px;color:#4a6080;background:rgba(80,130,200,0.12);padding:1px 7px;border-radius:8px">${items.length}</span>
+            </summary>
+            ${rows}
+          </details>`;
+        }).join('');
+    }
+    invPanel.style.display = '';
+  }
+
   if (lastState) renderFocusFilters(lastState.eventLog, agentId);
   if (lastState) renderEventLog(lastState.eventLog, lastState.categories || [], true);
 
@@ -1015,6 +1158,8 @@ function exitFocusMode() {
 
   const _eduDetailsExit = document.getElementById('focus-edu-details');
   if (_eduDetailsExit) _eduDetailsExit.style.display = 'none';
+  const _invExit = document.getElementById('focus-inventory');
+  if (_invExit) _invExit.style.display = 'none';
   if (starmapInstance) starmapInstance.highlightedAgent = null;
   if (lastState) renderEventLog(lastState.eventLog, lastState.categories || [], true);
   if (document.querySelector('.rpanel-tab[data-rtab="chats"]')?.classList.contains('active')) {
@@ -1227,8 +1372,37 @@ const FOCUS_TAB_MATCH = {
   dialogue:     /dialogue|speech|say|talk|speak|whisper|proclaim|announce|declares?/i,
 };
 
+// Per-type override colors (left border + dot color)
+const EV_TYPE_COLOR = {
+  combat_win:         '#ff4444', combat_fail:        '#ff4444',
+  combat_upset:       '#ff4444', combat_draw:        '#ff8844',
+  combat_retreat:     '#ff8844', combat_negotiated:  '#ffcc00',
+  combat_surrender:   '#ff4444', combat_intervention:'#ff8844',
+  alliance_formed:    '#44ff88', alliance_help:      '#44ff88',
+  ally_attack:        '#ff8844', betrayal:           '#ff8844',
+  item_created:       '#bb33ff', enhancement:        '#ffcc00',
+  enhancement_fail:   '#ffcc00', enhancement_cost:   '#ffcc00',
+  war:                '#ff3344', war_ended:          '#44ff88',
+  peace_declared:     '#44ff88', combat_timeout_peace:'#44ff88',
+};
+// Per-type icon prefix
+const EV_TYPE_ICON = {
+  combat_win:         '⚔️ ', combat_fail:        '⚔️ ',
+  combat_upset:       '⚔️ ', combat_draw:        '⚔️ ',
+  combat_retreat:     '⚔️ ', combat_negotiated:  '⚔️ ',
+  combat_surrender:   '⚔️ ', combat_intervention:'⚔️ ',
+  alliance_formed:    '🤝 ', alliance_help:      '🤝 ',
+  ally_attack:        '💔 ', betrayal:           '💔 ',
+  item_created:       '🔨 ', enhancement:        '✨ ',
+  enhancement_fail:   '💥 ', enhancement_cost:   '✨ ',
+  war:                '⚡ ', war_ended:          '🕊️ ',
+  peace_declared:     '🕊️ ', combat_timeout_peace:'🕊️ ',
+};
+
 function _buildEventNode(e, catMap) {
-  const cat  = catMap[e.type] || { color: '#8b949e', label: e.type || '' };
+  const cat        = catMap[e.type] || { color: '#8b949e', label: e.type || '' };
+  const evColor    = EV_TYPE_COLOR[e.type] || cat.color || '#333355';
+  const evIcon     = EV_TYPE_ICON[e.type]  || '';
   const bold = BOLD_TYPES.has(e.type) ? ' ev-bold' : '';
   const time = fmtTime(e.ts);
   const catLabel = cat.label || e.type || '';
@@ -1236,7 +1410,8 @@ function _buildEventNode(e, catMap) {
   const tsLabel  = e.ts ? new Date(e.ts).toLocaleTimeString('en-GB', { hour12: false }) : '';
   const div = document.createElement('div');
   div.className = 'ev-entry' + bold;
-  div.style.setProperty('--ev-color', cat.color);
+  div.style.setProperty('--ev-color', evColor);
+  div.style.borderLeft = `3px solid ${evColor}`;
   if (agentId) div.dataset.agentId = agentId;
   div.dataset.evKey = String(e.ts || '') + '_' + (e.type || '');
   div.dataset.evTs  = String(e.ts || '0');
@@ -1261,8 +1436,11 @@ function _buildEventNode(e, catMap) {
   const _evIsExp = expandedEvents.has(evId);
 
   function _evMsgHtml(expanded) {
-    if (fullMsg.length <= EV_LIMIT || expanded) return esc(fullMsg);
-    return `${esc(fullMsg.slice(0, EV_LIMIT))}<span class="ev-trunc-hint"> …</span>`;
+    // Strip any leading emoji/icon already embedded in the message to avoid double icons
+    const strippedMsg = fullMsg.replace(/^[\u{1F300}-\u{1FFFF}\u2600-\u27FF][\uFE0F\u20E3]?\s*/u, '');
+    const displayMsg  = evIcon ? evIcon + strippedMsg : fullMsg;
+    if (displayMsg.length <= EV_LIMIT || expanded) return esc(displayMsg);
+    return `${esc(displayMsg.slice(0, EV_LIMIT))}<span class="ev-trunc-hint"> …</span>`;
   }
 
   div.dataset.evExpandId = evId;
@@ -2459,9 +2637,8 @@ function _buildSmartLbList(list, valFn, label) {
 function renderLeaderboard(lb) {
   if (!lbList) return;
   const repFn = e => {
-    const sign = (e.rep ?? 0) >= 0 ? '+' : '';
     const lvPart = (e.repLevel ?? 0) !== 0 ? `Lv.${e.repLevel} ` : '';
-    return `${lvPart}${sign}${e.rep ?? 0}`;
+    return `${lvPart}${formatRep(e.rep ?? 0)}`;
   };
   const tabData = {
     score:    { list: lb.byScore,    valFn: e => e.rankScore ?? 0,    label: 'Rank Score' },
@@ -2797,8 +2974,8 @@ document.addEventListener('click', function(e) {
   panel.style.cssText = [
     'position:fixed', 'z-index:9400', 'display:none',
     'background:rgba(4,10,24,0.97)', 'border:1px solid rgba(80,130,200,0.45)',
-    'border-radius:12px', 'padding:14px 16px', 'min-width:240px', 'max-width:320px', 'max-height:70vh',
-    'overflow-y:auto', 'box-shadow:0 0 32px rgba(80,130,255,0.22)',
+    'border-radius:10px', 'padding:12px 14px', 'min-width:220px', 'max-width:300px', 'max-height:72vh',
+    'overflow-y:auto', 'box-shadow:0 0 28px rgba(80,130,255,0.20)',
     'font-family:"JetBrains Mono",monospace', 'color:#c8d8f0',
   ].join(';');
   document.body.appendChild(panel);
@@ -2814,29 +2991,42 @@ document.addEventListener('click', function(e) {
   document.addEventListener('keydown', e => { if (e.key === 'Escape') closeCatPanel(); });
 
   window.showCategoryPanel = function (agentId, category, objs, sx, sy) {
-    const agent = (lastState?.agents || []).find(a => a.id === agentId);
-    const color = agent ? _agentColor(agent) : '#58a6ff';
+    const CAT_COLORS = {
+      weapon:'#ff3344', armor:'#3377ff', knowledge:'#ffcc00',
+      consumable:'#33ff88', magic:'#bb33ff', structure:'#ff7733',
+    };
+    const cat   = (category || 'other').toLowerCase();
+    const color = CAT_COLORS[cat] || '#6688aa';
 
     let html = `
       <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px">
-        <div style="font-size:11px;font-weight:700;color:${esc(color)};letter-spacing:0.06em">${esc(category)}</div>
-        <span style="font-size:9px;color:#4a6080;background:rgba(80,130,200,0.12);padding:2px 7px;border-radius:8px">${objs.length} objects</span>
+        <div style="font-size:11px;font-weight:700;color:${esc(color)};letter-spacing:0.08em;text-transform:uppercase">${esc(category)}</div>
+        <span style="font-size:9px;color:#4a6080;background:rgba(80,130,200,0.12);padding:2px 7px;border-radius:8px">${objs.length} item${objs.length !== 1 ? 's' : ''}</span>
       </div>`;
 
     for (const obj of objs) {
-      const svgPart = obj.visualSVG
-        ? `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" width="36" height="36" style="flex-shrink:0;border-radius:4px;overflow:hidden">${obj.visualSVG}</svg>`
-        : `<div style="width:36px;height:36px;border-radius:50%;background:${esc(color)};opacity:0.25;flex-shrink:0"></div>`;
-      const purpose = esc((obj.purpose || obj.desc || '').slice(0, 100));
+      const gr = obj.grade || 1;
+      const grStars = gr >= 3 ? '★★★' : gr >= 2 ? '★★' : '★';
+      const grColor = gr >= 3 ? '#ffd700' : gr >= 2 ? color : '#5a7090';
+      const border  = gr >= 3 ? `border-left:3px solid #ffd700;padding-left:7px;box-shadow:-3px 0 8px rgba(255,215,0,0.25)`
+                    : gr >= 2 ? `border-left:3px solid ${color};padding-left:7px`
+                    : 'padding-left:10px';
+      const effectText = (obj.effect || '').slice(0, 55);
+      const cb = obj.combat_bonus;
+      const combatStr = cb && (cb.attack || cb.defense)
+        ? `ATK+${cb.attack || 0} DEF+${cb.defense || 0}` : '';
 
       html += `
         <div class="cat-obj-row" data-obj-id="${esc(obj.id)}" style="
-          display:flex;gap:10px;align-items:flex-start;padding:8px 6px;border-radius:8px;
-          cursor:pointer;border-bottom:1px solid rgba(80,130,200,0.10);margin-bottom:2px">
-          ${svgPart}
-          <div style="min-width:0">
+          display:flex;gap:8px;align-items:flex-start;padding:6px 4px;border-radius:5px;
+          cursor:pointer;margin-bottom:2px;border-bottom:1px solid rgba(80,130,200,0.08);${border}">
+          <div style="flex-shrink:0;min-width:24px;text-align:center;padding-top:1px">
+            <div style="font-size:9px;color:${esc(grColor)};font-weight:700;letter-spacing:1px">${grStars}</div>
+          </div>
+          <div style="min-width:0;flex:1">
             <div style="font-size:10px;font-weight:700;color:${esc(color)};white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(obj.name)}</div>
-            ${purpose ? `<div style="font-size:8.5px;color:#7090b0;margin-top:2px;line-height:1.4">${purpose}</div>` : ''}
+            ${effectText ? `<div style="font-size:8px;color:#7090b0;margin-top:1px;line-height:1.35">${esc(effectText)}${obj.effect && obj.effect.length > 55 ? '…' : ''}</div>` : ''}
+            ${combatStr ? `<div style="font-size:8px;color:#ff9966;margin-top:1px">${esc(combatStr)}</div>` : ''}
           </div>
         </div>`;
     }
@@ -2901,32 +3091,42 @@ document.addEventListener('click', function(e) {
 
   document.addEventListener('keydown', e => { if (e.key === 'Escape') closeWOPopup(); });
 
-  const WO_ICONS  = { law: '⚖', religion: '✦', discovery: '✸', verdict: '⚡', concept: '◈' };
-  const WO_COLORS = { law: '#ffd700', religion: '#c084fc', discovery: '#64dcff', verdict: '#ff6060', concept: '#50c8a0' };
+  const WO_ICONS  = { law: '⚖', religion: '✦', discovery: '✸', verdict: '⚡', concept: '◈',
+                      weapon: '⚔', armor: '◈', knowledge: '◉', structure: '⬡', consumable: '◆', magic: '✦' };
+  const WO_COLORS = { law: '#ffd700', religion: '#c084fc', discovery: '#64dcff', verdict: '#ff6060', concept: '#50c8a0',
+                      weapon: '#ff6b6b', armor: '#74c0fc', knowledge: '#a9e34b', structure: '#ffd43b', consumable: '#ff9f43', magic: '#cc5de8' };
 
   window.showWorldObjectInfo = function (obj, screenX, screenY, agentSx, agentSy) {
-    const ap    = obj.appearance;
-    const color = ap?.primaryColor || WO_COLORS[obj.type] || '#88aaff';
-    const glow  = ap?.glowColor    || color;
-    const icon  = ap?.symbol ? ap.symbol.slice(0, 4) : (WO_ICONS[obj.type] || '◈');
-    const shapeLabel = ap ? `${ap.shape}` : obj.type;
-    const creator = (obj.agentIds || []).map(id => agentsById.get(id)?.name || null).filter(Boolean)[0] || null;
-    const creatorStr = creator ? `Created by ${esc(creator)}` : '';
-    const age = obj.spawnTs ? Math.round((Date.now() - obj.spawnTs) / 1000) : null;
-    const ageStr = age !== null ? (age < 60 ? `${age}s ago` : age < 3600 ? `${Math.round(age/60)}m ago` : `${Math.round(age/3600)}h ago`) : '';
+    const CAT_COLORS = {
+      weapon:'#ff3344', armor:'#3377ff', knowledge:'#ffcc00',
+      consumable:'#33ff88', magic:'#bb33ff', structure:'#ff7733',
+    };
+    const CAT_ICONS = { weapon:'⚔', armor:'◈', knowledge:'◉', consumable:'◆', magic:'✦', structure:'⬡' };
+    const cat   = (obj.category || 'other').toLowerCase();
+    const color = CAT_COLORS[cat] || '#88aaff';
+    const icon  = CAT_ICONS[cat] || '●';
+    const gr    = obj.grade || 1;
+    const grStars  = gr >= 3 ? '★★★' : gr >= 2 ? '★★' : '★';
+    const grColor  = gr >= 3 ? '#ffd700' : gr >= 2 ? color : '#7090b0';
+    const cb       = obj.combat_bonus;
+    const combatStr = cb && (cb.attack || cb.defense)
+      ? `ATK +${cb.attack || 0}  DEF +${cb.defense || 0}` : null;
+    const owner = (obj.agentIds || []).map(id => agentsById.get(id)?.name || null).filter(Boolean)[0] || null;
     popup.innerHTML = `
-      <div style="display:flex;align-items:center;gap:10px;margin-bottom:4px">
-        <span style="font-size:22px;color:${color};text-shadow:0 0 10px ${glow};font-family:'JetBrains Mono',monospace">${esc(icon)}</span>
+      <div style="display:flex;align-items:center;gap:10px;margin-bottom:6px">
+        <span style="font-size:20px;color:${color};text-shadow:0 0 10px ${color};font-family:'JetBrains Mono',monospace">${esc(icon)}</span>
         <div>
           <div style="font-size:12px;font-weight:700;color:${color};letter-spacing:0.05em">${esc(obj.name)}</div>
-          <div style="font-size:9px;color:#7090b0;margin-top:1px;text-transform:uppercase;letter-spacing:0.1em">${esc(shapeLabel)} · ${esc(obj.type)}</div>
+          <div style="font-size:9px;color:#7090b0;margin-top:1px;text-transform:uppercase;letter-spacing:0.1em">${esc(cat)} · item</div>
         </div>
       </div>
-      ${obj.desc ? `<div style="font-size:9.5px;color:#9ab0d0;line-height:1.5;margin-bottom:3px">${truncHtml(obj.desc)}</div>` : ''}
-      ${(creatorStr || ageStr) ? `<div style="font-size:9px;color:#6080a8">${creatorStr}${creatorStr && ageStr ? ' · ' : ''}${ageStr}</div>` : ''}
-      ${ap ? `<div style="font-size:9px;color:#506888;margin-top:2px">AI-designed appearance</div>` : ''}
+      <div style="color:${esc(grColor)};font-size:11px;letter-spacing:3px;margin-bottom:4px">${grStars}</div>
+      ${obj.effect ? `<div style="font-size:9.5px;color:#9ab0d0;line-height:1.5;margin-bottom:3px">${esc(obj.effect)}</div>` : ''}
+      ${obj.passive_effect ? `<div style="font-size:9px;color:#a0b8d8;line-height:1.4;margin-bottom:2px"><span style="color:#7090b0">Passive: </span>${esc(obj.passive_effect)}</div>` : ''}
+      ${combatStr ? `<div style="font-size:9px;color:#ff9966;margin-bottom:3px">${esc(combatStr)}</div>` : ''}
+      ${owner ? `<div style="font-size:9px;color:#5a7090;margin-top:2px">Held by ${esc(owner)}</div>` : ''}
       <button onclick="window.closeWOPopup()"
-        style="margin-top:6px;align-self:flex-end;background:none;border:1px solid rgba(80,130,200,0.35);
+        style="margin-top:8px;align-self:flex-end;background:none;border:1px solid rgba(80,130,200,0.35);
                border-radius:5px;padding:2px 10px;color:#6080a8;cursor:pointer;font-size:9px">CLOSE</button>
     `;
     popup.style.display = 'flex';
@@ -3076,10 +3276,22 @@ document.addEventListener('click', function(e) {
   };
 
   trackBtn.addEventListener('click', () => {
-    const myAgents = SocioLLM.loadMyAgents();
-    const alive    = (lastState?.agents || []).filter(a => a.alive && myAgents[a.id]);
-    if (!alive.length) return;
-    const nowTracking = starmapInstance.trackAgent(alive[0].id);
+    // Primary: new login system stores agent ID in sessionStorage
+    const sessionAgentId = sessionStorage.getItem('my_agent_id');
+    // Fallback: legacy SocioLLM registration
+    const legacyAgents = SocioLLM.loadMyAgents();
+    const allAgents    = lastState?.agents || [];
+
+    let target = null;
+    if (sessionAgentId) {
+      target = allAgents.find(a => a.alive && a.id === sessionAgentId);
+    }
+    if (!target) {
+      target = allAgents.find(a => a.alive && legacyAgents[a.id]);
+    }
+    if (!target) return;
+
+    const nowTracking = starmapInstance.trackAgent(target.id);
     trackBtn.textContent = nowTracking ? '\u2297 Release Track' : '\u2853 Track My Agent';
     trackBtn.style.borderColor = nowTracking ? 'rgba(255,215,60,0.6)' : '';
     trackBtn.style.color       = nowTracking ? 'rgba(255,215,60,0.9)' : '';
@@ -3374,22 +3586,22 @@ function validatePasswordClient(pw) {
       localStorage.removeItem('sai_session_token');
       overlay.style.display = '';
     })();
-    return;
+    // No early return — fall through to attach all event listeners so they're
+    // ready when the overlay reappears after a failed token verification.
   }
 
   // ── Card refs ──
+  const s0    = document.getElementById('ob-s0');
   const s1    = document.getElementById('ob-s1');
+  const s1Ret = document.getElementById('ob-s1-ret');
   const s2    = document.getElementById('ob-s2');
   const s3New = document.getElementById('ob-s3-new');
-  const s3Ret = document.getElementById('ob-s3-ret');
   const s4    = document.getElementById('ob-s4');
   const s5    = document.getElementById('ob-s5');
   const sWb   = document.getElementById('ob-s-wb');
   const dots  = document.querySelectorAll('#ob-dots .ob-dot');
 
-  const ALL_CARDS = [s1, s2, s3New, s3Ret, s4, s5, sWb].filter(Boolean);
-
-  let _isReturning = false; // true when nickname is taken
+  const ALL_CARDS = [s0, s1, s1Ret, s2, s3New, s4, s5, sWb].filter(Boolean);
 
   function showCard(id) {
     ALL_CARDS.forEach(c => c.classList.add('ob-hidden'));
@@ -3406,10 +3618,27 @@ function validatePasswordClient(pw) {
     overlay.addEventListener('animationend', () => { overlay.style.display = 'none'; }, { once: true });
   }
 
-  // ── Step 1: Welcome ──
-  document.getElementById('ob-begin').addEventListener('click', () => {
+  // ── Step 0: Welcome ──
+  document.getElementById('ob-s0-begin').addEventListener('click', () => {
+    showCard('ob-s1');
+    setDots(0);
+  });
+
+  // ── Step 1: New or Returning ──
+  document.getElementById('ob-s1-new').addEventListener('click', () => {
     showCard('ob-s2');
     setDots(1);
+  });
+
+  document.getElementById('ob-s1-returning').addEventListener('click', () => {
+    showCard('ob-s1-ret');
+    setDots(0);
+  });
+
+  // ── Step 1-Ret: Returning user back ──
+  document.getElementById('ob-back-s1-ret').addEventListener('click', () => {
+    showCard('ob-s1');
+    setDots(0);
   });
 
   // ── Step 2: Nickname ──
@@ -3417,7 +3646,8 @@ function validatePasswordClient(pw) {
   const nickStatus = document.getElementById('ob-nick-status');
   const nickErr    = document.getElementById('ob-nick-err');
   let _nickDebounce = null;
-  let _nickChecked  = false; // true once server responded
+  let _nickChecked  = false;
+  let _nickTaken    = false;
 
   document.getElementById('ob-back-s2').addEventListener('click', () => {
     showCard('ob-s1'); setDots(0);
@@ -3425,6 +3655,7 @@ function validatePasswordClient(pw) {
 
   async function checkNickname(name) {
     _nickChecked = false;
+    _nickTaken   = false;
     if (!name || name.length < 2) { nickStatus.textContent = ''; return; }
     try {
       const res  = await fetch(`/api/check-nickname?name=${encodeURIComponent(name)}`);
@@ -3432,20 +3663,18 @@ function validatePasswordClient(pw) {
       _nickChecked = true;
       if (data.error) {
         nickStatus.innerHTML = `<span class="ob-nick-err-inline">${esc(data.error)}</span>`;
-        _isReturning = false;
       } else if (data.available) {
-        nickStatus.innerHTML = '<span class="ob-nick-ok">&#10003; Available — new agent</span>';
-        _isReturning = false;
+        nickStatus.innerHTML = '<span class="ob-nick-ok">&#10003; Available</span>';
       } else {
-        nickStatus.innerHTML = '<span class="ob-nick-taken">Welcome back! Enter your password to continue.</span>';
-        _isReturning = true;
+        nickStatus.innerHTML = '<span class="ob-nick-taken">Name already taken — choose another or use "Returning" to log in.</span>';
+        _nickTaken = true;
       }
     } catch { _nickChecked = false; }
   }
 
   nickInput.addEventListener('input', () => {
     _nickChecked = false;
-    _isReturning = false;
+    _nickTaken   = false;
     nickStatus.textContent = '';
     nickErr.textContent = '';
     clearTimeout(_nickDebounce);
@@ -3459,18 +3688,15 @@ function validatePasswordClient(pw) {
     if (err) { nickErr.textContent = err; return; }
     nickErr.textContent = '';
     if (!_nickChecked) await checkNickname(name);
-    if (_isReturning) {
-      document.getElementById('ob-ret-name-label').textContent = `Password for "${esc(name)}"`;
-      document.getElementById('ob-ret-title').textContent = `Welcome back, ${esc(name)}!`;
-      showCard('ob-s3-ret');
-      setDots(2);
-    } else {
-      showCard('ob-s3-new');
-      setDots(2);
+    if (_nickTaken) {
+      nickErr.textContent = 'That name is taken. Choose another, or click Back → Returning to log in.';
+      return;
     }
+    showCard('ob-s3-new');
+    setDots(2);
   });
 
-  // ── Step 3a: New user password ──
+  // ── Step 3: New user password ──
   const pwInput    = document.getElementById('ob-password');
   const pw2Input   = document.getElementById('ob-password2');
   const pwErrEl    = document.getElementById('ob-pw-err');
@@ -3510,11 +3736,14 @@ function validatePasswordClient(pw) {
     setDots(3);
   });
 
-  // ── Step 4: Provider + Notes ──
+  // ── Step 4: Identity Note ──
   const notesInput = document.getElementById('ob-notes');
+  const notesCount = document.getElementById('ob-notes-count');
+
   notesInput.addEventListener('input', function () {
+    if (notesCount) notesCount.textContent = this.value.length;
     this.style.height = 'auto';
-    this.style.height = Math.min(this.scrollHeight, 180) + 'px';
+    this.style.height = Math.min(this.scrollHeight, 200) + 'px';
   });
 
   document.getElementById('ob-back-s4').addEventListener('click', () => {
@@ -3527,7 +3756,7 @@ function validatePasswordClient(pw) {
     document.getElementById('ob-summary').innerHTML = `
       <div class="ob-sum-row"><div class="ob-sum-label">Agent Name</div><div class="ob-sum-val">${esc(name)}</div></div>
       <div class="ob-sum-row"><div class="ob-sum-label">AI Provider</div><div class="ob-sum-val"><span class="ai-chip Groq">Groq</span></div></div>
-      ${notes ? `<div class="ob-sum-row"><div class="ob-sum-label">Education</div><div class="ob-sum-notes">${esc(notes)}</div></div>` : ''}
+      ${notes ? `<div class="ob-sum-row"><div class="ob-sum-label">Identity Note</div><div class="ob-sum-notes">${esc(notes.slice(0, 50))}${notes.length > 50 ? '…' : ''}</div></div>` : ''}
     `;
     showCard('ob-s5');
     setDots(4);
@@ -3573,20 +3802,18 @@ function validatePasswordClient(pw) {
     }
   });
 
-  // ── Step 3b: Returning user login ──
-  const retPwInput = document.getElementById('ob-ret-password');
-  const retPwErr   = document.getElementById('ob-ret-pw-err');
-
-  document.getElementById('ob-back-s3-ret').addEventListener('click', () => {
-    showCard('ob-s2'); setDots(1);
-  });
+  // ── Returning user login ──
+  const retNickInput = document.getElementById('ob-ret-nick');
+  const retPwInput   = document.getElementById('ob-ret-password');
+  const retPwErr     = document.getElementById('ob-ret-pw-err');
 
   document.getElementById('ob-ret-login-btn').addEventListener('click', async () => {
     const btn  = document.getElementById('ob-ret-login-btn');
-    const name = nickInput.value.trim();
+    const name = retNickInput.value.trim();
     const pw   = retPwInput.value;
 
-    if (!pw) { retPwErr.textContent = 'Password is required.'; return; }
+    if (!name) { retPwErr.textContent = 'Nickname is required.'; return; }
+    if (!pw)   { retPwErr.textContent = 'Password is required.'; return; }
     retPwErr.textContent = '';
     btn.disabled    = true;
     btn.textContent = 'Signing in\u2026';
@@ -3615,7 +3842,7 @@ function validatePasswordClient(pw) {
           ${a.educationNotes ? `<div class="ob-wb-row" style="align-items:flex-start"><span class="ob-wb-k">Education</span><span class="ob-wb-v" style="text-align:right;max-width:65%;font-size:11px;opacity:0.8">${esc(a.educationNotes)}</span></div>` : ''}
         `;
         showCard('ob-s-wb');
-        setDots(3);
+        setDots(5);
       } else {
         retPwErr.textContent = data.error || 'Login failed.';
         btn.disabled    = false;
@@ -3772,7 +3999,7 @@ function validatePasswordClient(pw) {
       const aiCls     = (a.aiSystem || 'Other').toLowerCase();
       const rep       = a.rep ?? 0;
       const repCls    = rep < 0 ? 'rep-neg' : '';
-      const repStr    = (rep >= 0 ? '+' : '') + rep;
+      const repStr    = formatRep(rep);
       const badges    = (a.badges || []).slice(0, 3).map(b =>
         `<span class="myh-badge">${esc(b.name || '')}</span>`).join('');
       const lastAct   = (a.lastAction || 'no actions yet').replace(/_/g, ' ');
@@ -3827,7 +4054,7 @@ function validatePasswordClient(pw) {
     const aiCls     = (agent.aiSystem || 'Other').toLowerCase();
     const rep       = agent.rep ?? 0;
     const repCls    = rep < 0 ? 'rep-neg' : '';
-    const repStr    = (rep >= 0 ? '+' : '') + rep;
+    const repStr    = formatRep(rep);
     const badges    = (agent.badges || []).map(b =>
       `<span class="myh-badge">${esc(b.name || '')}</span>`).join('');
 

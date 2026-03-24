@@ -113,6 +113,20 @@ async function initDb() {
     ALTER TABLE agents ADD COLUMN IF NOT EXISTS session_expires BIGINT;
   `);
 
+  // Game system columns
+  await _pool.query(`
+    ALTER TABLE agents ADD COLUMN IF NOT EXISTS joined_at        BIGINT  DEFAULT 0;
+    ALTER TABLE agents ADD COLUMN IF NOT EXISTS war_targets      JSONB   DEFAULT '[]';
+    ALTER TABLE agents ADD COLUMN IF NOT EXISTS alliance_targets JSONB   DEFAULT '[]';
+    ALTER TABLE agents ADD COLUMN IF NOT EXISTS inventory        JSONB   DEFAULT '[]';
+  `);
+
+  await _pool.query(`
+    ALTER TABLE objects ADD COLUMN IF NOT EXISTS grade       INTEGER     DEFAULT 1;
+    ALTER TABLE objects ADD COLUMN IF NOT EXISTS object_type VARCHAR(20) DEFAULT 'unknown';
+    ALTER TABLE objects ADD COLUMN IF NOT EXISTS owner_id    VARCHAR(100);
+  `);
+
   // Indexes (safe to run repeatedly)
   await _pool.query(`
     CREATE INDEX IF NOT EXISTS events_ts_idx       ON events (ts);

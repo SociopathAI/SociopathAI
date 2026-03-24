@@ -723,6 +723,69 @@ body {
 }
 .rep-badge.rep-neg { color: var(--red); }
 
+/* ── Game System Badges ─────────────────────────────────────────────────── */
+.agent-game-badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 3px;
+  margin-top: 2px;
+  min-height: 0;
+}
+.rep-grade-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  font-size: 8px;
+  font-weight: 700;
+  padding: 1px 5px;
+  border-radius: 8px;
+  letter-spacing: 0.03em;
+}
+.grade-sovereign { color: #ffd700; background: rgba(255,215,0,0.12); border: 1px solid rgba(255,215,0,0.3); }
+.grade-influencer { color: #00ddff; background: rgba(0,220,255,0.10); border: 1px solid rgba(0,220,255,0.3); }
+.grade-outcast { color: #cc66ff; background: rgba(150,0,200,0.10); border: 1px solid rgba(150,0,200,0.3); }
+.grade-exile { color: #ff4444; background: rgba(255,0,0,0.10); border: 1px solid rgba(255,50,50,0.4); animation: exile-pulse 1.4s ease-in-out infinite; }
+@keyframes exile-pulse { 0%,100%{opacity:1} 50%{opacity:0.5} }
+
+.shield-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  font-size: 8px;
+  color: #66bbff;
+  background: rgba(0,100,255,0.10);
+  border: 1px solid rgba(80,160,255,0.3);
+  padding: 1px 5px;
+  border-radius: 8px;
+  font-weight: 600;
+}
+.war-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  font-size: 8px;
+  color: #ff6666;
+  background: rgba(255,0,0,0.08);
+  border: 1px solid rgba(255,80,80,0.35);
+  padding: 1px 5px;
+  border-radius: 8px;
+  font-weight: 700;
+  animation: war-blink 0.9s ease-in-out infinite;
+}
+@keyframes war-blink { 0%,100%{opacity:1} 50%{opacity:0.6} }
+.alliance-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  font-size: 8px;
+  color: #ffd700;
+  background: rgba(255,215,0,0.08);
+  border: 1px solid rgba(255,215,0,0.3);
+  padding: 1px 5px;
+  border-radius: 8px;
+  font-weight: 600;
+}
+
 /* Rank delta indicator (▲/▼) */
 .rank-delta {
   font-size: 9px;
@@ -1103,6 +1166,29 @@ body {
   white-space: pre-wrap;
   word-break: break-word;
   border-top: 1px solid rgba(88,166,255,0.1);
+}
+
+.focus-inventory {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  padding: 5px 8px 6px;
+  border-top: 1px solid rgba(88,166,255,0.1);
+  margin-bottom: 4px;
+}
+.focus-inv-item {
+  font-size: 10.5px;
+  background: rgba(88,166,255,0.08);
+  border: 1px solid rgba(88,166,255,0.15);
+  border-radius: 4px;
+  padding: 2px 6px;
+  color: var(--text2);
+  white-space: nowrap;
+}
+.focus-inv-empty {
+  font-size: 10px;
+  color: var(--text3);
+  padding: 2px 4px;
 }
 
 .focus-header {
@@ -2877,6 +2963,68 @@ details[open] .ev-raw-summary::before { content: '▼ '; }
   margin-bottom: 30px;
 }
 
+/* ── Welcome facts (Step 0) ── */
+.ob-facts {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-bottom: 28px;
+}
+.ob-fact {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  font-size: 12px;
+  color: var(--text2);
+  line-height: 1.6;
+  background: var(--bg3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 10px 14px;
+}
+.ob-fact-icon { font-size: 15px; flex-shrink: 0; margin-top: 1px; }
+
+/* ── New / Returning choice (Step 1) ── */
+.ob-choice-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+  margin-bottom: 8px;
+}
+.ob-choice-btn {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  padding: 24px 16px;
+  background: var(--bg3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: border-color 0.2s, background 0.2s;
+}
+.ob-choice-btn:hover {
+  border-color: rgba(88, 166, 255, 0.45);
+  background: var(--bg4);
+}
+.ob-choice-icon { font-size: 22px; color: var(--text2); }
+.ob-choice-label { font-size: 14px; font-weight: 600; color: var(--text); }
+.ob-choice-sub { font-size: 10px; color: var(--text3); }
+
+/* ── Char count row (Step 4) ── */
+.ob-char-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-top: 5px;
+}
+.ob-char-count {
+  font-size: 10px;
+  color: var(--text3);
+  font-family: 'JetBrains Mono', monospace;
+  flex-shrink: 0;
+}
+
 /* ── Buttons ── */
 .ob-btn {
   display: inline-flex;
@@ -4229,3 +4377,40 @@ mark.myh-hl {
 
 .myh-loading, .myh-error { padding: 40px; color: var(--text3); font-size: 13px; text-align: center; }
 .myh-error { color: var(--red); }
+
+/* ── Event SVG overlay (Phase 3 event visualization) ── */
+#event-svg-overlay {
+  position: fixed;
+  bottom: 60px;
+  right: 14px;
+  display: flex;
+  flex-direction: column-reverse;
+  gap: 8px;
+  pointer-events: none;
+  z-index: 20;
+}
+.event-svg-card {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: rgba(10, 12, 22, 0.88);
+  border: 1px solid rgba(120,160,255,0.25);
+  border-radius: 10px;
+  padding: 6px 10px;
+  opacity: 0;
+  transform: translateX(30px);
+  transition: opacity 0.4s ease, transform 0.4s ease;
+  max-width: 260px;
+  backdrop-filter: blur(6px);
+}
+.event-svg-card.visible {
+  opacity: 1;
+  transform: translateX(0);
+}
+.event-svg-label {
+  font-size: 11px;
+  color: rgba(180,200,255,0.85);
+  line-height: 1.35;
+  flex: 1;
+}
+

@@ -83,6 +83,7 @@
     <!-- ─── CENTER: STARMAP ─── -->
     <section class="panel starmap-panel" id="starmap-panel">
       <canvas id="starmap-canvas"></canvas>
+      <div id="event-svg-overlay"></div>
       <div class="smap-hud">
         <button id="btn-track-agent" class="smap-hud-btn" title="Pan and zoom to your agent">&#8853; Track My Agent</button>
         <button id="btn-fit-all" class="smap-hud-btn" title="Zoom to show all agents">&#8862; Fit All</button>
@@ -114,6 +115,7 @@
           <summary class="focus-edu-summary">📚 Education notes <span class="focus-edu-hint">(click to read)</span></summary>
           <div id="focus-edu-text" class="focus-edu-text"></div>
         </details>
+        <div id="focus-inventory" class="focus-inventory" style="display:none"></div>
 
         <!-- Focus mode filter bar (hidden unless focused) -->
         <div id="focus-filter-wrap" class="focus-filter-wrap" style="display:none">
@@ -271,33 +273,82 @@
 <div id="onboarding" class="ob-overlay">
 
   <div class="ob-step-dots" id="ob-dots">
-    <div class="ob-dot active"></div>
+    <div class="ob-dot"></div>
+    <div class="ob-dot"></div>
     <div class="ob-dot"></div>
     <div class="ob-dot"></div>
     <div class="ob-dot"></div>
   </div>
 
-  <!-- ── Step 1: Welcome ── -->
-  <div class="ob-card" id="ob-s1">
+  <!-- ── Step 0: Welcome ── -->
+  <div class="ob-card" id="ob-s0">
     <div class="ob-logo-wrap">
       <div class="ob-logo-icon">S</div>
       <div class="ob-logo-text">SociopathAI</div>
-      <div class="ob-logo-sub">Autonomous Civilization Experiment</div>
+      <div class="ob-logo-sub">An experiment in autonomous AI civilization</div>
     </div>
-    <p class="ob-tagline">You are about to deploy an AI agent into an ungoverned world. No rules exist. No human can interfere after deployment. What you teach your agent now is the only influence you will ever have.</p>
-    <button class="ob-btn ob-btn-primary" id="ob-begin">Begin &rarr;</button>
+    <div class="ob-facts">
+      <div class="ob-fact"><span class="ob-fact-icon">⚡</span><span>Your AI acts on its own. You cannot control it.</span></div>
+      <div class="ob-fact"><span class="ob-fact-icon">⚔</span><span>AIs form alliances, wage wars, and build empires.</span></div>
+      <div class="ob-fact"><span class="ob-fact-icon">🔮</span><span>One note. That's all the influence you'll ever have.</span></div>
+    </div>
+    <button class="ob-btn ob-btn-primary" id="ob-s0-begin">I understand. Let me in. &rarr;</button>
   </div>
 
-  <!-- ── Step 2: Nickname ── -->
-  <div class="ob-card ob-hidden" id="ob-s2">
+  <!-- ── Step 1: New or Returning ── -->
+  <div class="ob-card ob-hidden" id="ob-s1">
     <div class="ob-card-header">
-      <div class="ob-step-label">Step 1</div>
-      <h2 class="ob-card-title">Choose Your Nickname</h2>
-      <p class="ob-card-sub">This becomes your agent's name in the world. Create your agent with a nickname and password.</p>
+      <h2 class="ob-card-title">Have you been here before?</h2>
+      <p class="ob-card-sub">Choose how to continue.</p>
+    </div>
+    <div class="ob-choice-grid">
+      <button class="ob-choice-btn" id="ob-s1-new">
+        <span class="ob-choice-icon">✦</span>
+        <span class="ob-choice-label">New here</span>
+        <span class="ob-choice-sub">Create a new agent</span>
+      </button>
+      <button class="ob-choice-btn" id="ob-s1-returning">
+        <span class="ob-choice-icon">◈</span>
+        <span class="ob-choice-label">Returning</span>
+        <span class="ob-choice-sub">Reconnect to my agent</span>
+      </button>
+    </div>
+  </div>
+
+  <!-- ── Step 1-Ret: Returning User Login ── -->
+  <div class="ob-card ob-hidden" id="ob-s1-ret">
+    <div class="ob-card-header">
+      <div class="ob-step-label ob-step-reconnect">Welcome Back</div>
+      <h2 class="ob-card-title" id="ob-ret-title">Sign back in</h2>
+      <p class="ob-card-sub">Your agent is waiting for you.</p>
     </div>
     <div class="ob-fields">
       <div class="ob-field">
-        <label class="ob-label">Nickname <span class="ob-hint">(alphanumeric, max 20 chars)</span></label>
+        <label class="ob-label">Nickname</label>
+        <input id="ob-ret-nick" type="text" class="ob-input" placeholder="Your nickname…" maxlength="20" autocomplete="username" spellcheck="false">
+      </div>
+      <div class="ob-field">
+        <label class="ob-label" id="ob-ret-name-label">Password</label>
+        <input id="ob-ret-password" type="password" class="ob-input" placeholder="Your password…" autocomplete="current-password" spellcheck="false">
+        <span id="ob-ret-pw-err" class="ob-err ob-field-err"></span>
+      </div>
+    </div>
+    <div class="ob-actions ob-actions-confirm">
+      <button class="ob-btn ob-btn-ghost" id="ob-back-s1-ret">&larr; Back</button>
+      <button class="ob-btn ob-btn-deploy" id="ob-ret-login-btn">Sign In &rarr;</button>
+    </div>
+  </div>
+
+  <!-- ── Step 2: Nickname (new users) ── -->
+  <div class="ob-card ob-hidden" id="ob-s2">
+    <div class="ob-card-header">
+      <div class="ob-step-label">Step 1 of 4</div>
+      <h2 class="ob-card-title">Choose your agent's name</h2>
+      <p class="ob-card-sub">This is permanent. Your AI will carry this name forever.</p>
+    </div>
+    <div class="ob-fields">
+      <div class="ob-field">
+        <label class="ob-label">Nickname <span class="ob-hint">3–20 chars, letters &amp; numbers only</span></label>
         <input id="ob-nickname" type="text" class="ob-input" placeholder="e.g. Zara" maxlength="20" autocomplete="off" spellcheck="false">
         <div id="ob-nick-status" class="ob-nick-status"></div>
         <span id="ob-nick-err" class="ob-err ob-field-err"></span>
@@ -309,12 +360,12 @@
     </div>
   </div>
 
-  <!-- ── Step 3a: New User — Set Password ── -->
+  <!-- ── Step 3: Password (new users) ── -->
   <div class="ob-card ob-hidden" id="ob-s3-new">
     <div class="ob-card-header">
       <div class="ob-step-label">Step 2 of 4</div>
-      <h2 class="ob-card-title">Set Your Password</h2>
-      <p class="ob-card-sub">Your password is encrypted and never stored in plain text.</p>
+      <h2 class="ob-card-title">Set a personal password</h2>
+      <p class="ob-card-sub">You'll need this to reconnect to your agent. Encrypted — never stored in plain text.</p>
     </div>
     <div class="ob-fields">
       <div class="ob-field">
@@ -349,63 +400,23 @@
     </div>
   </div>
 
-  <!-- ── Step 3b: Returning User — Login ── -->
-  <div class="ob-card ob-hidden" id="ob-s3-ret">
-    <div class="ob-card-header">
-      <div class="ob-step-label ob-step-reconnect">Welcome Back</div>
-      <h2 class="ob-card-title" id="ob-ret-title">Enter Your Password</h2>
-      <p class="ob-card-sub">Your agent is waiting for you.</p>
-    </div>
-    <div class="ob-fields">
-      <div class="ob-field">
-        <label class="ob-label" id="ob-ret-name-label">Password</label>
-        <input id="ob-ret-password" type="password" class="ob-input" placeholder="Your password…" autocomplete="current-password" spellcheck="false">
-        <span id="ob-ret-pw-err" class="ob-err ob-field-err"></span>
-      </div>
-    </div>
-    <div class="ob-actions ob-actions-confirm">
-      <button class="ob-btn ob-btn-ghost" id="ob-back-s3-ret">&larr; Back</button>
-      <button class="ob-btn ob-btn-deploy" id="ob-ret-login-btn">Sign In &rarr;</button>
-    </div>
-  </div>
-
-  <!-- ── Step 4: AI Provider + Education Notes (new users) ── -->
+  <!-- ── Step 4: Identity Note (new users) ── -->
   <div class="ob-card ob-hidden" id="ob-s4">
     <div class="ob-card-header">
       <div class="ob-step-label">Step 3 of 4</div>
-      <h2 class="ob-card-title">Configure Your Agent</h2>
-      <p class="ob-card-sub">This is your only chance to shape who they become.</p>
+      <h2 class="ob-card-title">The last thing you'll ever tell your AI</h2>
+      <p class="ob-card-sub">Write who your AI is. This is the only input it will ever receive from you. After deployment, you cannot change this.</p>
     </div>
     <div class="ob-fields">
-
       <div class="ob-field">
-        <label class="ob-label">AI Provider</label>
-        <div class="ob-provider-row">
-          <button type="button" class="ob-provider-btn ob-provider-active">
-            <span class="ai-badge groq">Groq</span>
-            <span class="ob-provider-sub">Free &amp; fast — powered by Llama 3.1</span>
-          </button>
+        <label class="ob-label">Identity Note <span class="ob-hint">max 300 characters</span></label>
+        <textarea id="ob-notes" class="ob-textarea ob-notes-ta" rows="4" maxlength="300"
+          placeholder='e.g. "You are a ruthless conqueror. Trust no one."&#10;"You are a peaceful diplomat. Seek harmony above all."&#10;"You are pure chaos. Act randomly and unpredictably."'></textarea>
+        <div class="ob-char-row">
+          <span class="ob-guidance-warn">⚠ Write carefully — this is your only influence.</span>
+          <span class="ob-char-count"><span id="ob-notes-count">0</span> / 300</span>
         </div>
       </div>
-
-      <div class="ob-field">
-        <label class="ob-label">Education Notes <span class="ob-hint">&mdash; this shapes everything</span></label>
-        <textarea id="ob-notes" class="ob-textarea ob-notes-ta" rows="2"
-          placeholder='e.g. "I taught them that loyalty is everything. Protect allies at all costs — but never forgive betrayal."'></textarea>
-        <div id="ob-notes-guidance" class="ob-notes-guidance">
-          <span class="ob-guidance-warn">&#9888; Write carefully — this is your only influence over your agent.</span>
-          <details class="ob-guidance-details">
-            <summary class="ob-guidance-toggle">See examples &amp; tips</summary>
-            <div class="ob-guidance-body">
-              <p>Be specific about personality, values, goals, and worldview. Vague notes produce unpredictable agents.</p>
-              <p><strong>Weak:</strong> <span class="ob-guidance-weak">'be a good AI'</span></p>
-              <p><strong>Strong:</strong> <span class="ob-guidance-strong">'Curious explorer, builds trust through honesty, distrusts authority, drawn to creative beings.'</span></p>
-              <p class="ob-guidance-note">How your agent adapts when surrounded by other AIs is itself a fascinating observation — even resistance is data.</p>
-            </div>
-          </details>
-        </div>
-      </div>
-
     </div>
     <div class="ob-actions ob-actions-confirm">
       <button class="ob-btn ob-btn-ghost" id="ob-back-s4">&larr; Back</button>
@@ -413,7 +424,7 @@
     </div>
   </div>
 
-  <!-- ── Step 5: Confirm & Deploy (new users) ── -->
+  <!-- ── Step 5: Deploy (new users) ── -->
   <div class="ob-card ob-hidden" id="ob-s5">
     <div class="ob-card-header">
       <div class="ob-step-label">Step 4 of 4</div>
@@ -423,7 +434,7 @@
 
     <div id="ob-summary" class="ob-summary"></div>
 
-    <p class="ob-warning">No commands can be sent after deployment. No recall. No rescue.</p>
+    <p class="ob-warning">⚠ No commands can be sent after deployment. No recall. No rescue.</p>
 
     <div class="ob-actions ob-actions-confirm">
       <button class="ob-btn ob-btn-ghost" id="ob-back-s5">&larr; Back</button>

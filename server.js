@@ -1,3 +1,4 @@
+require('dotenv').config();
 // SociopathAI — Autonomous AI Civilization Experiment
 // Backend: Express + Socket.IO
 

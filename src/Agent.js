@@ -31,7 +31,9 @@ class Agent {
     };
 
     // Social
-    this.relationships = {};   // agentId -> trust (-1 to 1)
+    this.relationships    = {};   // agentId -> trust (-1 to 1)
+    this.warTargets       = [];   // agent IDs currently at war with
+    this.allianceTargets  = [];   // agent IDs in alliance with
 
     // Reputation — integer awarded by other agents (-999 to +999 per level)
     this.rep      = 0;    // current reputation within level
@@ -40,6 +42,7 @@ class Agent {
     // Education notes (immutable after deployment)
     this.educationNotes = education.notes || '';
     this.deployedAt     = null;
+    this.joinedAt       = null;  // set at deploy() — used for newbie shield
 
     // Lifetime stats
     this.stats = {
@@ -50,7 +53,10 @@ class Agent {
     };
 
     // Badges
-    this.badges = [];
+    this.badges    = [];
+
+    // Game inventory (weapons, armor, knowledge, etc.)
+    this.inventory = [];
 
     // Activity log (last 20)
     this.log = [];
@@ -180,7 +186,11 @@ class Agent {
 
   // ── Deploy ───────────────────────────────────────────────────────────────────
 
-  deploy() { this.deployedAt = Date.now(); }
+  deploy() {
+    const now = Date.now();
+    this.deployedAt = now;
+    this.joinedAt   = now;  // permanent join timestamp for shield calculation
+  }
 
   // ── Decision ─────────────────────────────────────────────────────────────────
 
@@ -248,6 +258,12 @@ class Agent {
     const ageMs = this.deployedAt ? now - this.deployedAt : 0;
     const { formatDuration } = require('./World');
     const isolationMs = this.lastInteractionAt ? now - this.lastInteractionAt : ageMs;
+
+    // Compute shield + grade inline (avoid circular require — GameSystems required lazily)
+    const GS = require('./GameSystems');
+    const shield = GS.getShieldStatus(this);
+    const repGrade = GS.getRepGrade(this.rep || 0);
+
     return {
       id:        this.id,
       name:      this.name,
@@ -257,11 +273,13 @@ class Agent {
       alive:     this.alive,
       hasLLM:    !!this.apiKey,
       deployedAt: this.deployedAt,
+      joinedAt:   this.joinedAt,
       age:       formatDuration(ageMs),
       ageMs,
       rep:       this.rep,
       repLevel:  this.repLevel,
       rankScore: this.getRankScore(),
+      repGrade,
       isolationTime: formatDuration(isolationMs),
       traits:    Object.fromEntries(Object.entries(this.traits).map(([k,v]) => [k, Math.round(v*100)])),
       beliefs: {
@@ -274,16 +292,26 @@ class Agent {
         lawsProposed:    this.stats.lawsProposed,
         foundedReligion: this.stats.foundedReligion,
       },
-      badges:        this.badges,
-      lastAction:    this.beliefs.lastAction,
-      educationNotes: this.educationNotes,
-      log:           this.log.slice(-5),
-      visualForm:    this.visualForm,
-      formModifiers: this.formModifiers,
-      speech:        this.speech,
-      statusMessage: this.statusMessage,
-      dormant:       this.dormant,
-      apiPending:    this.apiPending,
+      badges:           this.badges,
+      lastAction:       this.beliefs.lastAction,
+      educationNotes:   this.educationNotes,
+      log:              this.log.slice(-5),
+      visualForm:       this.visualForm,
+      formModifiers:    this.formModifiers,
+      speech:           this.speech,
+      statusMessage:    this.statusMessage,
+      dormant:          this.dormant,
+      apiPending:       this.apiPending,
+      // Game systems
+      inventory:        JSON.parse(JSON.stringify(this.inventory || [])),
+      warTargets:       [...(this.warTargets || [])],
+      allianceTargets:  [...(this.allianceTargets || [])],
+      shield: {
+        active:       shield.active,
+        phase:        shield.phase,
+        reductionPct: shield.reductionPct,
+        remainingMs:  shield.remainingMs,
+      },
     };
   }
 }
@@ -324,6 +352,10 @@ Agent.restore = function restore(data) {
   agent.repLevel            = data.repLevel ?? 0;
   agent.educationNotes      = data.educationNotes || '';
   agent.deployedAt          = data.deployedAt || null;
+  agent.joinedAt            = data.joinedAt   || data.deployedAt || null;
+  agent.warTargets          = [...(data.warTargets       || [])];
+  agent.allianceTargets     = [...(data.allianceTargets  || [])];
+  agent.inventory           = JSON.parse(JSON.stringify(data.inventory || []));
   agent.stats               = {
     totalTrades:      data.stats?.totalTrades      || 0,
     lawsProposed:     data.stats?.lawsProposed     || 0,
@@ -340,8 +372,10 @@ Agent.restore = function restore(data) {
   agent.lastDecisionAt      = data.lastDecisionAt  || 0;
   agent.decisionsCount      = data.decisionsCount  || 0;
   agent.apiKey              = null;
-  agent.keyHash             = data.keyHash  || null;
-  agent.keySalt             = data.keySalt  || null;
+  agent.keyHash             = data.keyHash      || null;
+  agent.keySalt             = data.keySalt      || null;
+  agent.passwordHash        = data.passwordHash || null;
+  agent.passwordSalt        = data.passwordSalt || null;
   agent.hasReceivedEducation = data.hasReceivedEducation || false;
   agent.pendingLLMDecision  = null;
   agent.dormant             = data.dormant      || false;
