@@ -13,8 +13,8 @@ const PROVIDER_PROFILES = {
   Claude:      { type: 'anthropic', base: 'https://api.anthropic.com',           models: ['claude-haiku-4-5-20251001', 'claude-3-haiku-20240307'] },
   ChatGPT:     { type: 'oai',       base: 'https://api.openai.com',              models: ['gpt-4o-mini', 'gpt-3.5-turbo'] },
   Gemini:      { type: 'google',    base: null,                                   models: ['gemini-2.0-flash', 'gemini-1.5-flash-latest', 'gemini-1.5-pro-latest'] },
-  Groq:        { type: 'oai',       base: 'https://api.groq.com/openai',         models: ['llama-3.3-70b-versatile', 'llama-3.1-8b-instant', 'gemma2-9b-it'] },
-  Llama:       { type: 'oai',       base: 'https://api.groq.com/openai',         models: ['llama-3.3-70b-versatile', 'llama-3.1-8b-instant', 'gemma2-9b-it'] },
+  Groq:        { type: 'oai',       base: 'https://api.groq.com/openai',         models: ['llama-3.3-70b-versatile'] },
+  Llama:       { type: 'oai',       base: 'https://api.groq.com/openai',         models: ['llama-3.3-70b-versatile'] },
   Grok:        { type: 'oai',       base: 'https://api.x.ai',                    models: ['grok-3-mini', 'grok-2-1212'] },
   Mistral:     { type: 'oai',       base: 'https://api.mistral.ai',              models: ['mistral-small-latest', 'mistral-tiny'] },
   DeepSeek:    { type: 'oai',       base: 'https://api.deepseek.com',            models: ['deepseek-chat'] },
@@ -44,8 +44,8 @@ const PROVIDER_FALLBACKS = {
   ChatGPT:     ['gpt-4o-mini', 'gpt-3.5-turbo'],
   Other:       ['gpt-4o-mini', 'gpt-3.5-turbo'],
   Gemini:      ['gemini-2.0-flash', 'gemini-1.5-flash-latest', 'gemini-1.5-pro-latest'],
-  Groq:        ['llama-3.3-70b-versatile', 'llama-3.1-8b-instant', 'gemma2-9b-it'],
-  Llama:       ['llama-3.3-70b-versatile', 'llama-3.1-8b-instant', 'gemma2-9b-it'],
+  Groq:        ['llama-3.3-70b-versatile'],
+  Llama:       ['llama-3.3-70b-versatile'],
   Grok:        ['grok-3-mini', 'grok-2-1212'],
   OpenRouter:  ['meta-llama/llama-3.3-70b-instruct:free'],
 };
@@ -253,7 +253,7 @@ let _orFreePoolKey = null; // the OR API key that populated the pool
 
 // ── Provider-specific preferred-order lists (for ranking only — not whitelists) ──
 
-const _GROQ_PREFERRED   = ['llama-3.3-70b-versatile', 'llama-3.1-8b-instant', 'llama3-70b-8192', 'gemma2-9b-it'];
+const _GROQ_PREFERRED   = ['llama-3.3-70b-versatile'];
 const _GEMINI_PREFERRED = ['gemini-2.0-flash', 'gemini-1.5-flash-latest', 'gemini-1.5-pro-latest'];
 
 // Gemini-specific: model must advertise generateContent support (it's a multi-modal API)
@@ -365,7 +365,7 @@ async function _fetchModelsForProvider(providerName, apiKey, forceRefresh) {
     switch (providerName) {
       case 'Groq':
       case 'Llama':
-        models = await _fetchGroqModelsDynamic(apiKey); break;
+        models = ['llama-3.3-70b-versatile']; break; // fixed — no dynamic fetch to avoid model sprawl
       case 'ChatGPT':
       case 'Other':
         models = await _fetchOpenAIModels(apiKey); break;
@@ -498,8 +498,8 @@ setInterval(async () => {
 
 // Minimum ms between consecutive calls on the same API key
 const PROVIDER_COOLDOWNS_MS = {
-  Groq:       2000,   // 30 RPM  → 60000/30 = 2000ms
-  Llama:      2000,
+  Groq:       3000,   // capped to single model — 3s minimum between calls
+  Llama:      3000,
   Gemini:     4000,   // 15 RPM  → 60000/15 = 4000ms
   ChatGPT:    1000,
   Claude:     1000,
@@ -1693,7 +1693,7 @@ async function resolveProvider(apiKey, aiSystem, agentName) {
 async function callAsAdmin(system, user, maxTokens = 200) {
   const adminKey = process.env.ADMIN_GROQ_KEY;
   if (!adminKey) return null;
-  const profile = PROVIDER_PROFILES['Groq'];
+  const profile = { ...PROVIDER_PROFILES['Groq'], name: 'Groq', models: ['llama-3.3-70b-versatile'] };
   return _directCall(adminKey, profile, 'admin', system, user, maxTokens, 30000);
 }
 
