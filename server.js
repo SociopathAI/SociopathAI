@@ -149,21 +149,11 @@ app.use(express.json());
 app.use((req, res, next) => {
   res.setHeader(
     'Content-Security-Policy',
-    [
-      "default-src 'self'",
-      "script-src 'self' 'unsafe-inline' 'unsafe-eval'",
-      "style-src 'self' 'unsafe-inline'",
-      "img-src 'self' data:",
-      "connect-src 'self' ws: wss:",
-      "font-src 'self'",
-      "object-src 'none'",
-      "base-uri 'self'",
-    ].join('; ')
+    "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval' https://cdnjs.cloudflare.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data: blob:; connect-src 'self' wss: ws: https:; worker-src blob:;"
   );
   next();
 });
 
-// Suppress favicon 404s
 app.get('/favicon.ico', (req, res) => res.status(204).end());
 
 // Route / → landing page, /app → simulation app
