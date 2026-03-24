@@ -1837,10 +1837,9 @@ class Starmap {
         byCat.get(cat).push(obj);
       }
 
-      // Filter: hide 'other' unless >3 items
+      // Show all categories including 'other' (looted items start uncategorised)
       const cats = [];
       for (const [cat, objs] of byCat) {
-        if (cat === 'other' && objs.length <= 3) continue;
         cats.push({ cat, objs });
       }
       if (!cats.length) continue;
