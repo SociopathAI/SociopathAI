@@ -478,6 +478,13 @@ socket.on('connect', () => {
   socket.emit('requestState');
 });
 
+// Keepalive ping every 25s — resets grace period timer if socket briefly dropped
+setInterval(() => {
+  if (socket && socket.connected) {
+    socket.emit('keepalive');
+  }
+}, 25000);
+
 // On actual tab/browser close: signal server immediately so agent exits cleanly
 window.addEventListener('beforeunload', () => {
   const myAgentId = sessionStorage.getItem('my_agent_id');
