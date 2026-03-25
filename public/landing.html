@@ -509,7 +509,7 @@ function _getEventStyle(entry) {
   script.src = '/socket.io/socket.io.js';
   script.onload = () => {
     try {
-      const socket     = io({ timeout: 5000 });
+      const socket     = io({ transports: ['websocket', 'polling'], timeout: 5000 });
       const agentsById = {};
       let   _worldStartedAt = 0;
       let   _systemEventCount = 0;
