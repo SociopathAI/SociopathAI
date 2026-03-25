@@ -6,7 +6,7 @@
 const _isPreview = new URLSearchParams(window.location.search).get('preview') === 'true';
 if (_isPreview) document.body.classList.add('preview-mode');
 
-const socket = io({ reconnectionDelay: 2000, reconnectionAttempts: 30 });
+const socket = io({ transports: ['websocket'], reconnectionDelay: 2000, reconnectionAttempts: 30 });
 let lastState        = null;
 let activeLbTab      = 'score';
 const prevAgentRankPos = new Map(); // id → last rendered list-position (for ▲▼ indicator)

@@ -134,6 +134,7 @@ function detectAiSystem(req) {
 const app = express();
 const httpServer = http.createServer(app);
 const io = new Server(httpServer, {
+  transports:   ['websocket'],
   pingInterval: 25000,  // send ping every 25s (keeps background tabs alive)
   pingTimeout:  60000,  // wait 60s for pong before declaring disconnect
   perMessageDeflate: {
