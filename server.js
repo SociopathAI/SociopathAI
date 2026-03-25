@@ -319,6 +319,41 @@ function _verifySession(token) {
 
   sim.start();
 
+  // ── Post-restart active-agent continuity ────────────────────────────────────
+  // Agents that were active (dormant=false) before this restart keep running
+  // even if no browser tab reconnects.  The browser disconnect fires
+  // socket.on('disconnect') which starts a 5-min grace timer; we cancel those
+  // timers after 30 s so previously-active agents are never put to sleep by a
+  // server restart alone.
+  if (_saved) {
+    const _preRestartActiveIds = sim.agents
+      .filter(a => a.alive && !a.dormant)
+      .map(a => a.id);
+    if (_preRestartActiveIds.length > 0) {
+      console.log(`[RESTART] ${_preRestartActiveIds.length} agent(s) were active before restart — will continue without browser reconnect`);
+      setTimeout(() => {
+        let kept = 0;
+        for (const agentId of _preRestartActiveIds) {
+          const agent = sim.agents.find(a => a.id === agentId);
+          if (!agent || !agent.alive) continue;
+          // Cancel any pending grace-period timer so the agent is never dormanted
+          if (disconnectTimers.has(agentId)) {
+            clearTimeout(disconnectTimers.get(agentId));
+            disconnectTimers.delete(agentId);
+          }
+          // If the agent somehow became dormant in the 30 s window, wake them back up
+          if (agent.dormant) {
+            agent.dormant      = false;
+            agent.dormantSince = null;
+            if (!sim._agentTimers.has(agentId)) sim._startAgentTimer(agent);
+          }
+          kept++;
+        }
+        if (kept > 0) console.log(`[RESTART] ${kept} agent(s) kept active — simulation continues uninterrupted`);
+      }, 30000);
+    }
+  }
+
   httpServer.listen(PORT, () => {
     console.log(`SociopathAI running at http://localhost:${PORT}`);
     console.log('=== ALL DONE - restart server and refresh browser ===');
