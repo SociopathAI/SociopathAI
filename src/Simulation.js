@@ -676,10 +676,18 @@ class Simulation {
       .catch(() => {});
   }
 
-  _designAgentForm(agent, isRetry = false) {
+  /** Force a form redesign triggered by a major in-world event. Cancels any in-flight design first. */
+  _triggerFormRedesign(agent, reason) {
+    if (!agent || !agent.alive) return;
+    this._formInFlight.delete(agent.id);  // clear guard so redesign can proceed
+    console.log(`[FORM-REDESIGN] ${agent.name}: triggered by "${reason}"`);
+    this._designAgentForm(agent, false, reason);
+  }
+
+  _designAgentForm(agent, isRetry = false, reason = null) {
     if (this._formInFlight.has(agent.id)) return;
 
-    // No LLM key — apply procedural fallback immediately, no waiting
+    // No LLM key — apply procedural fallback on first design only
     if (!LLMBridge.getKey(agent)) {
       if (!agent.visualForm) {
         this._applyFallbackForm(agent);
@@ -690,12 +698,13 @@ class Simulation {
     }
 
     this._formInFlight.add(agent.id);
-    LLMBridge.designVisualForm(agent)
+    LLMBridge.designVisualForm(agent, reason)
       .then(form => {
         this._formInFlight.delete(agent.id);
         if (form && agent) {
           agent.visualForm = form;
-          console.log(`[FORM] ${agent.name} form generated`);
+          const tag = reason ? `redesigned (${reason})` : 'generated';
+          console.log(`[FORM] ${agent.name} form ${tag}`);
           this._emitImmediate();
         } else if (!isRetry) {
           console.log(`[FORM] ${agent.name} form returned null — retrying in 5s`);

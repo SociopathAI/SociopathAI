@@ -210,7 +210,7 @@ class Starmap {
     const lastTsStr = lastTs ? new Date(lastTs).toLocaleTimeString('en-US', { hour12:false, hour:'2-digit', minute:'2-digit', second:'2-digit' }) : null;
     // Relationship state label
     const relType   = conn.relationType || 'neutral';
-    const relLabels = { war: '⚔️ AT WAR', alliance: '🤝 ALLIED', hostile: '⚠️ Hostile', neutral: '' };
+    const relLabels = { war: '⚔️ AT WAR', alliance: '🤝 ALLIED', hostile: '😠 HOSTILE', neutral: '' };
     const relLabel  = relLabels[relType] || '';
     const relColor  = relType === 'war' ? '#ff4444' : relType === 'alliance' ? '#ffd700' : relType === 'hostile' ? '#ff8c00' : '#aaccee';
 
@@ -910,7 +910,7 @@ class Starmap {
     }
   }
 
-  /** Draw connection lines between agents — relationship type overrides AI design. */
+  /** Draw connection lines between agents — visual design is 100% AI-decided. */
   _drawConnections(ctx, t) {
     const hl    = this.highlightedAgent || this._hoverHighlightId;
     for (const c of this.connections) {
@@ -924,31 +924,14 @@ class Starmap {
       const design  = c.design;
       const relType = c.relationType || 'neutral';
 
-      // ── Relationship-type overrides (game system) ──
+      // ── Visual: AI-decided for all relationship types ──
       let color, style, effect, lineWidthMult = 1;
-      if (relType === 'war') {
-        // Red pulsing lightning style
-        color  = '#ff2222';
-        style  = 'dashed';
-        effect = 'spark';
-        lineWidthMult = 1.8;
-      } else if (relType === 'alliance') {
-        // Gold thick glowing line
-        color  = '#ffd700';
-        style  = 'solid';
-        effect = 'glow';
-        lineWidthMult = 1.5;
-      } else if (relType === 'hostile') {
-        // Orange dashed
-        color  = '#ff8c00';
-        style  = 'dashed';
-        effect = 'none';
-      } else {
-        // Neutral: AI-decided or default
-        color  = design?.color || '#6688aa';
-        style  = design?.style  || 'solid';
-        effect = design?.effect || 'none';
-      }
+      color  = design?.color  || '#6688aa';
+      style  = design?.style  || 'solid';
+      effect = design?.effect || 'none';
+      // War/alliance lines slightly bolder for readability without overriding AI color
+      if (relType === 'war')      lineWidthMult = 1.8;
+      if (relType === 'alliance') lineWidthMult = 1.5;
 
       // ── Line weight: from AI design or dialogue frequency, scaled by rel type ──
       const baseLw = design?.thickness
@@ -985,12 +968,12 @@ class Starmap {
       ctx.lineWidth   = lineWidth;
 
       // ── Glow ──
-      const glowStr = (effect === 'glow' || relType === 'alliance' || isHl || isHover) ? (isHover ? 18 : 12) : 5;
+      const glowStr = (effect === 'glow' || isHl || isHover) ? (isHover ? 18 : 12) : 5;
       ctx.shadowColor = hexRgba(color, isHover ? 0.85 : 0.55);
       ctx.shadowBlur  = glowStr;
 
-      // ── War spark: random brightness burst ──
-      if ((effect === 'spark' || relType === 'war') && Math.random() < 0.08) {
+      // ── Spark: random brightness burst (AI-triggered via effect field) ──
+      if (effect === 'spark' && Math.random() < 0.08) {
         ctx.shadowColor = hexRgba(color, 0.9);
         ctx.shadowBlur  = 24;
         ctx.strokeStyle = hexRgba(color, Math.min(alpha * 2.5, 1));
@@ -998,8 +981,7 @@ class Starmap {
 
       // ── Dash styles ──
       if (style === 'dashed') {
-        ctx.setLineDash(relType === 'war' ? [4, 4] : [8, 6]);
-        if (relType === 'war') ctx.lineDashOffset = -(t * 0.06) % 8; // animated
+        ctx.setLineDash([8, 6]);
       } else if (style === 'dotted') {
         ctx.setLineDash([2, 5]);
       } else if (effect === 'flow') {

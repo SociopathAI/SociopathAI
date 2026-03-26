@@ -1182,12 +1182,16 @@ function _dialogueResponderSystem(listener) {
 
 function _llbClamp(v, lo, hi) { return v < lo ? lo : v > hi ? hi : v; }
 
-async function designVisualForm(agent) {
+async function designVisualForm(agent, reason = null) {
   const key = getKey(agent);
   if (!key) return null;
 
   const t = agent.traits;
   const p = v => Math.round(v * 100);
+
+  const rep   = agent.rep || 0;
+  const grade = rep >= 500 ? 'Sovereign' : rep >= 100 ? 'Influencer' : rep >= -99 ? 'Neutral' : rep >= -499 ? 'Outcast' : 'Exile';
+  const sign  = rep >= 0 ? '+' : '';
 
   const system =
     `You are a visual designer for a dark space simulator. ` +
@@ -1195,10 +1199,15 @@ async function designVisualForm(agent) {
     `Use polygons, stars, and lines — NOT simple circles. ` +
     `Respond ONLY with valid JSON.`;
 
+  const reasonBlock = reason
+    ? `\nRecent significant event: ${reason}\nCurrent REP: ${sign}${rep} (Grade: ${grade}) — let this shape your aesthetic if you wish.\n`
+    : '';
+
   const user =
     `Agent: ${agent.name} [${agent.aiSystem}]\n` +
     `Character (0-100): Greed=${p(t.greed)}, Curiosity=${p(t.creativity)}, Aggression=${p(t.aggression)}, ` +
     `Sociability=${p(t.sociability)}, Order=${p(t.lawfulness)}, Spirituality=${p(t.piety)}\n` +
+    reasonBlock +
     `\nDesign their visual form: 2-5 shapes in ±14 unit space at (0,0).\n` +
     `Types: "circle"(cx,cy,r), "polygon"(cx,cy,r,sides,rotation), "star"(cx,cy,r,innerR,points), "line"(x1,y1,x2,y2,width)\n` +
     `High Aggression=jagged spikes. High Curiosity=asymmetric unusual. High Spirituality=radial star. High Greed=sharp crystal.\n\n` +

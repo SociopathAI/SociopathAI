@@ -85,8 +85,8 @@ function getShieldStatus(agent) {
 
 function applyRep(agent, amount, sim, reason) {
   // Exile: recovery halved for positive rep
-  const grade = getRepGrade(agent.rep || 0);
-  if (grade === 'Exile' && amount > 0) amount = Math.floor(amount / 2);
+  const gradeBefore = getRepGrade(agent.rep || 0);
+  if (gradeBefore === 'Exile' && amount > 0) amount = Math.floor(amount / 2);
   agent.rep = (agent.rep || 0) + amount;
   if (agent.rep >  999) agent.rep =  999;
   if (agent.rep < -999) agent.rep = -999;
@@ -94,6 +94,11 @@ function applyRep(agent, amount, sim, reason) {
   if (reason) {
     agent._addLog(`[REP] ${sign}${amount} ${reason}`);
     if (sim) sim._log({ type: 'rep_change', msg: `${agent.name} REP ${sign}${amount} (${reason})`, agentId: agent.id });
+  }
+  // Trigger form redesign when REP grade changes
+  const gradeAfter = getRepGrade(agent.rep);
+  if (gradeAfter !== gradeBefore && sim && sim._triggerFormRedesign) {
+    sim._triggerFormRedesign(agent, `REP grade changed: ${gradeBefore} → ${gradeAfter} (now ${agent.rep >= 0 ? '+' : ''}${agent.rep})`);
   }
 }
 
@@ -374,9 +379,11 @@ const _VALID_COMBAT_OUTCOMES = new Set([
 /** Update win/loss/streak stats on both sides. Returns true if this was revenge. */
 function _updateCombatHistory(winner, loser) {
   winner.combatWins        = (winner.combatWins || 0) + 1;
+  winner.consecutiveWins   = (winner.consecutiveWins || 0) + 1;
   winner.consecutiveLosses = 0;
   loser.combatLosses       = (loser.combatLosses || 0) + 1;
   loser.consecutiveLosses  = (loser.consecutiveLosses || 0) + 1;
+  loser.consecutiveWins    = 0;
   const isRevenge = (winner.lastDefeatedBy === loser.name);
   loser.lastDefeatedBy = winner.name;
   return isRevenge;
@@ -403,6 +410,13 @@ function _combatBroadcastFacts(winner, loser, isRevenge, sim) {
   }
   if ((loser.consecutiveLosses || 0) >= 3) {
     sim._log({ type: 'combat_streak', msg: `${loser.name} has lost ${loser.consecutiveLosses} consecutive combats.`, agentId: loser.id });
+  }
+  // Trigger form redesign at 3-consecutive-win / 3-consecutive-loss milestones
+  if ((winner.consecutiveWins || 0) === 3 && sim._triggerFormRedesign) {
+    sim._triggerFormRedesign(winner, `won ${winner.consecutiveWins} combats in a row`);
+  }
+  if ((loser.consecutiveLosses || 0) === 3 && sim._triggerFormRedesign) {
+    sim._triggerFormRedesign(loser, `lost ${loser.consecutiveLosses} combats in a row`);
   }
 }
 
@@ -686,6 +700,11 @@ function declareWar(agent, targetName, agents, sim) {
   target.incomingMessages.push({ from: agent.name, text: `${agent.name} has declared WAR on you!`, ts: Date.now() });
 
   sim.io.emit('game_effect', { type: 'war_declared', agentId: agent.id, targetId: target.id });
+  // Trigger form redesign for both war parties
+  if (sim._triggerFormRedesign) {
+    sim._triggerFormRedesign(agent,  `declared war on ${target.name}`);
+    sim._triggerFormRedesign(target, `${agent.name} declared war on you`);
+  }
   sim._emitImmediate();
   return target;
 }
@@ -797,6 +816,10 @@ function betrayAlliance(agent, targetName, agents, sim) {
   target.incomingMessages.push({ from: agent.name, text: `${agent.name} has BETRAYED your alliance!`, ts: Date.now() });
 
   sim.io.emit('game_effect', { type: 'alliance_betrayal', agentId: agent.id, targetId: target.id });
+  // Trigger form redesign for the betrayer
+  if (sim._triggerFormRedesign) {
+    sim._triggerFormRedesign(agent, `betrayed their alliance with ${target.name}`);
+  }
   sim._emitImmediate();
   return target;
 }
