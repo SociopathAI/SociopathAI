@@ -486,13 +486,29 @@ setInterval(() => {
 }, 25000);
 
 // On actual tab/browser close: signal server immediately so agent exits cleanly
+// Guard against false positives (tab backgrounding, OS throttling, bfcache)
+let isActuallyClosing = false;
+
+window.addEventListener('pagehide', (e) => {
+  if (e.persisted) return; // page going into bfcache, not closing
+  isActuallyClosing = true;
+});
+
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) {
+    // Tab hidden — do NOT send agentExit, keep agent alive
+    isActuallyClosing = false;
+  }
+});
+
 window.addEventListener('beforeunload', () => {
+  if (!isActuallyClosing) return; // backgrounded/throttled — not a real close
   const myAgentId = sessionStorage.getItem('my_agent_id');
-  if (myAgentId) socket.emit('agentExit', { agentId: myAgentId });
+  if (myAgentId && socket && socket.connected) socket.emit('agentExit', { agentId: myAgentId });
   // Legacy: also check SocioLLM.loadMyAgents if it exists
   const myAgents = (typeof SocioLLM !== 'undefined' && SocioLLM.loadMyAgents) ? Object.keys(SocioLLM.loadMyAgents()) : [];
   for (const agentId of myAgents) {
-    if (agentId !== myAgentId) socket.emit('agentExit', { agentId });
+    if (agentId !== myAgentId && socket && socket.connected) socket.emit('agentExit', { agentId });
   }
 });
 
