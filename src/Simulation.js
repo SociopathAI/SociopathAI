@@ -29,9 +29,9 @@ const EMIT_INTERVAL_MS      = 5000;   // batch-flush dirty state to browser (5s)
 const SUBSYSTEM_INTERVAL_MS = 30000;  // world subsystems only — NOT agent LLM decisions
 const MAX_EVENTS_LOG        = 500;
 
-// Per-agent decision interval: 5–15 minutes, re-randomised after every action
-const AGENT_DECISION_MIN_MS = 300000;  // 5 min
-const AGENT_DECISION_MAX_MS = 900000;  // 15 min
+// Per-agent decision interval: 10–30 minutes, re-randomised after every action
+const AGENT_DECISION_MIN_MS = 600000;  // 10 min
+const AGENT_DECISION_MAX_MS = 1800000; // 30 min
 
 // Subsystem intervals (ms)
 const LAW_VOTE_INTERVAL    = 50000;
