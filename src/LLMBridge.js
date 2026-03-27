@@ -1328,7 +1328,7 @@ async function designConnection(agentA, agentB) {
  *   - memorySummary: first sentence only, max 150 chars
  *   - incomingMsgs and educationNotes ALWAYS kept intact (never trimmed)
  */
-function _buildDecisionUser(agent, worldAwareness, incomingMsgs, pendingEvent, isFirst, smallCtx, allAgents) {
+function _buildDecisionUser(agent, worldAwareness, incomingMsgs, pendingEvent, isFirst, smallCtx, allAgents, worldLog) {
   const { formatDuration } = require('./World');
   const lines = [];
 
@@ -1477,13 +1477,19 @@ React to this world as your true self would.`);
     }
   }
 
+  // World log — last 10 public utterances, visible to all agents
+  if (worldLog && worldLog.length > 0) {
+    const last10 = worldLog.slice(-10);
+    lines.push(`WHAT'S HAPPENING IN THE WORLD RIGHT NOW:\n${last10.join('\n')}`);
+  }
+
   lines.push('What do you do?');
   return lines.join('\n');
 }
 
 // ─── Public API ────────────────────────────────────────────────────────────────
 
-async function decideAction(agent, world, allAgents, worldAwareness, incomingMsgs) {
+async function decideAction(agent, world, allAgents, worldAwareness, incomingMsgs, worldLog) {
   const key = getKey(agent);
   if (!key) return null;
   const isFirst = !agent.hasReceivedEducation;
@@ -1502,7 +1508,7 @@ async function decideAction(agent, world, allAgents, worldAwareness, incomingMsg
 
   const system    = _decisionSystem(agent, allAgents);
   const timeoutMs = Math.floor(Math.random() * 40000) + 50000;
-  const user      = _buildDecisionUser(agent, worldAwareness, incomingMsgs, pendingEvent, isFirst, preemptSmall, allAgents);
+  const user      = _buildDecisionUser(agent, worldAwareness, incomingMsgs, pendingEvent, isFirst, preemptSmall, allAgents, worldLog);
 
   let text = await _rawCall(key, agent.aiSystem, system, user, 400, timeoutMs, agent.name);
 
@@ -1511,7 +1517,7 @@ async function decideAction(agent, world, allAgents, worldAwareness, incomingMsg
     agent.smallContext      = true;
     agent.smallContextModel = agent.smallContextModel || agent.aiSystem;
     console.log(`[413] ${agent.name} prompt too large - skipping this cycle, will retry next`);
-    const truncUser = _buildDecisionUser(agent, worldAwareness, incomingMsgs, pendingEvent, isFirst, true, allAgents);
+    const truncUser = _buildDecisionUser(agent, worldAwareness, incomingMsgs, pendingEvent, isFirst, true, allAgents, worldLog);
     text = await _rawCall(key, agent.aiSystem, system, truncUser, 400, timeoutMs, agent.name);
     if (text === _CONTEXT_TOO_LONG || !text) {
       console.log(`[413] ${agent.name} prompt too large - skipping this cycle, will retry next`);

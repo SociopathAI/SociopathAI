@@ -377,6 +377,7 @@ class Simulation {
       const _wts = `${_wld.getHours().toString().padStart(2,'0')}:${_wld.getMinutes().toString().padStart(2,'0')}`;
       this.worldLog.push(`[${_wts}] ${agent.name}: "${displaySpeech.slice(0, 150)}"`);
       if (this.worldLog.length > 50) this.worldLog.shift();
+      console.log('[WORLD LOG] ' + agent.name + ': ' + displaySpeech.substring(0, 80));
 
       // Route only if message wasn't exclusively directed at offline agents
       if (namedTarget || offlineNamed.length === 0) {
@@ -387,6 +388,21 @@ class Simulation {
     const event = agent.act(action, this.world, this.agents, this.lawSystem, this, decision);
     agent.decisionsCount++;
     agent.lastDecisionAt = now;
+
+    // ── Track behavior pattern for visual reflection (last 5 actions) ──
+    const _bText = ((decision.action || '') + ' ' + (decision.speech || decision.dialogue || '')).toLowerCase();
+    let _bType = 'observe';
+    if (/attack|fight|strik|kill|stab|assassin|war\b|combat|destroy/.test(_bText)) _bType = 'attack';
+    else if (/peace|allia|treaty|friend|help|heal|gift|trade|cooperat/.test(_bText))  _bType = 'peace';
+    else if (/create|build|craft|forge|construct|make|invent/.test(_bText))           _bType = 'create';
+    if (!agent.recentBehaviors) agent.recentBehaviors = [];
+    agent.recentBehaviors.push(_bType);
+    if (agent.recentBehaviors.length > 5) agent.recentBehaviors.shift();
+    const _bCounts = { attack: 0, peace: 0, create: 0, observe: 0 };
+    for (const _b of agent.recentBehaviors) _bCounts[_b] = (_bCounts[_b] || 0) + 1;
+    const _bTop = Object.entries(_bCounts).sort((x, y) => y[1] - x[1])[0];
+    const _bColorMap = { attack: '#ff2244', peace: '#22ff66', create: '#aa44ff', observe: null };
+    agent.behaviorColor = _bTop[1] >= 3 ? _bColorMap[_bTop[0]] : null;
 
     if (event && !speechLine) {
       const ALWAYS_LOG = new Set(['crime', 'death', 'verdict', 'discovery', 'law', 'schism']);
@@ -604,7 +620,7 @@ class Simulation {
 
     this._llmInFlight.add(agent.id);
     try {
-      const decision = await LLMBridge.decideAction(agent, this.world, this.agents, worldAwareness, incomingMsgs);
+      const decision = await LLMBridge.decideAction(agent, this.world, this.agents, worldAwareness, incomingMsgs, this.worldLog);
       this._llmInFlight.delete(agent.id);
       if (_deferredCombatResult !== null && !agent.pendingCombatResult) {
         agent.pendingCombatResult = _deferredCombatResult;

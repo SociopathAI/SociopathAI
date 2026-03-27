@@ -1465,6 +1465,18 @@ class Starmap {
         ctx.restore();
       }
 
+      // ── Behavior color glow ring (reflects recent action pattern) ──
+      if (a.behaviorColor) {
+        const ba = 0.3 + Math.sin(t * 0.004 + nd.x * 0.01) * 0.2;
+        ctx.save();
+        ctx.shadowColor = hexRgba(a.behaviorColor, 0.7);
+        ctx.shadowBlur  = 20;
+        ctx.strokeStyle = hexRgba(a.behaviorColor, ba);
+        ctx.lineWidth   = 2;
+        ctx.beginPath(); ctx.arc(nd.x, nd.y, NODE_R + 6, 0, Math.PI * 2); ctx.stroke();
+        ctx.restore();
+      }
+
       // Inventory count badge (bottom-right corner of agent node)
       const invCount = this.worldObjects.filter(o => o.agentIds && o.agentIds[0] === id && o.isInventoryItem).length;
       if (invCount > 0) {

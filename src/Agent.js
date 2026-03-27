@@ -312,6 +312,7 @@ class Agent {
         reductionPct: shield.reductionPct,
         remainingMs:  shield.remainingMs,
       },
+      behaviorColor: this.behaviorColor || null,
     };
   }
 }
