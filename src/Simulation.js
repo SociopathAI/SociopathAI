@@ -895,35 +895,44 @@ class Simulation {
     const agentNameLower = agent.name.toLowerCase();
     const idToName       = new Map(this.agents.map(a => [a.id, a.name]));
 
-    // ── All online agents — equal visibility for every agent from the start ──
+    // ── All online agents — equal visibility, uniform format per agent ──
     let agentsBlock;
     if (!online.length) {
       agentsBlock = 'You are alone in this world right now.';
     } else {
       const agentLines = online.map(a => {
-        const grade   = GameSystems.getRepGrade(a.rep || 0);
-        const sign    = (a.rep || 0) >= 0 ? '+' : '';
-        const inv     = a.inventory || [];
-        const best    = inv.slice().sort((x, y) => (y.grade || 1) - (x.grade || 1))[0];
-        const itemStr = inv.length > 0
-          ? `carrying ${inv.length} items, best: "${best.name}" (${GameSystems.getGradeStars(best.grade || 1)})`
-          : 'no items';
-        const accum   = (inv.length >= 5 || (best && (best.grade || 1) >= 3))
-          ? ` — has accumulated ${inv.length} powerful items` : '';
-        return `  - ${a.name} [${a.aiSystem}] (REP: ${sign}${a.rep || 0}, Grade: ${grade}) — ${itemStr}${accum}`;
+        const sign   = (a.rep || 0) >= 0 ? '+' : '';
+        const inv    = a.inventory || [];
+        const status = (agent.warTargets      || []).includes(a.id) ? 'enemy'
+                     : (agent.allianceTargets || []).includes(a.id) ? 'ally'
+                     : 'neutral';
+        return `  - ${a.name} (REP: ${sign}${a.rep || 0}, Items: ${inv.length}, Status: ${status})`;
       });
       agentsBlock = `WORLD POPULATION RIGHT NOW:\n${agentLines.join('\n')}`;
     }
 
-    // ── Recent world events (online agents only — offline agents invisible) ─
-    const recentEvs = this.eventLog
+    // ── Recent world events: balanced — at least 1 per online agent ──
+    // Walk log backwards to get each online agent's most recent event
+    const latestByAgent = new Map();
+    for (let i = this.eventLog.length - 1; i >= 0; i--) {
+      const e = this.eventLog[i];
+      if (e.agentId && onlineIds.has(e.agentId) && !latestByAgent.has(e.agentId)) {
+        latestByAgent.set(e.agentId, e);
+        if (latestByAgent.size === online.length) break;
+      }
+    }
+    // Merge per-agent events with global recent slice, deduplicate by reference
+    const perAgentSet  = new Set(latestByAgent.values());
+    const globalSlice  = this.eventLog
       .filter(e => !e.agentId || onlineIds.has(e.agentId))
-      .slice(-maxEvents)
-      .map(e => {
-        const d  = new Date(e.ts || Date.now());
-        const ts = `${d.getHours().toString().padStart(2,'0')}:${d.getMinutes().toString().padStart(2,'0')}:${d.getSeconds().toString().padStart(2,'0')}`;
-        return `  [${ts}] ${e.msg || ''}`;
-      });
+      .slice(-maxEvents);
+    const combined = [...new Set([...perAgentSet, ...globalSlice])];
+    combined.sort((a, b) => (a.ts || 0) - (b.ts || 0));
+    const recentEvs = combined.slice(-maxEvents).map(e => {
+      const d  = new Date(e.ts || Date.now());
+      const ts = `${d.getHours().toString().padStart(2,'0')}:${d.getMinutes().toString().padStart(2,'0')}:${d.getSeconds().toString().padStart(2,'0')}`;
+      return `  [${ts}] ${e.msg || ''}`;
+    });
     const eventsBlock = `- Recent world events:\n${recentEvs.length ? recentEvs.join('\n') : '  (none yet)'}`;
 
     // ── Messages directed at this agent (online senders only) ───────────────

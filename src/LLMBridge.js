@@ -1406,9 +1406,18 @@ function _buildDecisionUser(agent, worldAwareness, incomingMsgs, pendingEvent, i
   // Pending world event
   if (pendingEvent) lines.push(pendingEvent.trim());
 
-  // Incoming messages — always kept intact (current message must survive truncation)
+  // Incoming messages — cap at 2 per sender so one relationship cannot dominate the prompt
   if (incomingMsgs && incomingMsgs.length > 0) {
-    const msgLines = incomingMsgs.map(m => `  ${m.from}: "${m.text.slice(0, 200)}"`);
+    const bySender = new Map();
+    for (const m of incomingMsgs) {
+      if (!bySender.has(m.from)) bySender.set(m.from, []);
+      bySender.get(m.from).push(m);
+    }
+    const capped = [];
+    for (const msgs of bySender.values()) {
+      capped.push(...msgs.slice(-2));  // 2 most recent per sender
+    }
+    const msgLines = capped.map(m => `  ${m.from}: "${m.text.slice(0, 200)}"`);
     lines.push(`MESSAGES WAITING FOR YOU:\n${msgLines.join('\n')}`);
   }
 
@@ -1466,6 +1475,15 @@ React to this world as your true self would.`);
 - ITEMS: CREATE ITEM [name] to create. ENHANCE [item] to upgrade (risky). COMBINE [item1] WITH [item2] to merge.
 - TRADE: GIVE [item] TO [name] to transfer. Steal via "I steal [item] from [name]".
 - REP: Your REP reflects your influence in this world — both its magnitude and direction shape how others see you.`);
+
+  // 10% chance: awareness nudge toward an agent not recently in focus
+  if (Math.random() < 0.10) {
+    const others = (allAgents || []).filter(a => a.alive && !a.dormant && a.id !== agent.id);
+    if (others.length > 0) {
+      const pick = others[Math.floor(Math.random() * others.length)];
+      lines.push(`You have not interacted with ${pick.name} recently. They exist in this world too.`);
+    }
+  }
 
   lines.push('What do you do?');
   return lines.join('\n');
