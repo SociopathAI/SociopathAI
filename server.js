@@ -809,13 +809,13 @@ io.on('connection', (socket) => {
     if (!stillConnected && !disconnectTimers.has(agentId)) {
       const agent = sim.agents.find(a => a.id === agentId);
       const name = agent ? agent.name : agentId.slice(0, 8);
-      console.log(`[SYSTEM] Socket lost - keeping ${name} active for 5 min grace period.`);
+      console.log(`[SYSTEM] Socket lost - keeping ${name} active for 30s grace period.`);
       const timer = setTimeout(() => {
         disconnectTimers.delete(agentId);
         // Still no reconnect — go dormant now
         const stillConn = [...socketAgentMap.values()].includes(agentId);
         if (!stillConn) sim.setDormant(agentId);
-      }, 300000);
+      }, 30000);
       disconnectTimers.set(agentId, timer);
     }
   });
