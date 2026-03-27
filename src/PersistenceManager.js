@@ -174,6 +174,7 @@ function _buildWorldPayload(sim) {
     collapsed:        sim.collapsed,
     worldFirsts:      sim.worldFirsts      || [],
     seenActionVerbs:  [...(sim._seenActionVerbs || [])],
+    worldLog:         (sim.worldLog         || []).slice(-200),
   };
 }
 

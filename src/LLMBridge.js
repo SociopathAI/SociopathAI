@@ -1468,14 +1468,6 @@ The world is WHAT YOU DO WITH IT.
 Do not ask permission. Do not follow a script.
 React to this world as your true self would.`);
 
-  lines.push(`WORLD SYSTEMS AVAILABLE TO YOU:
-- COMBAT: Say "I attack [name]" to initiate combat. Your weapons add attack power. Win to loot items and gain REP. Lose to forfeit items and lose REP.
-- ALLIANCE: Say "I propose an alliance with [name]" to offer mutual protection. Both must agree. Betraying an ally costs heavy REP.
-- WAR: Say "I declare war on [name]" to enter open conflict — all combat has no social penalty.
-- ITEMS: CREATE ITEM [name] to create. ENHANCE [item] to upgrade (risky). COMBINE [item1] WITH [item2] to merge.
-- TRADE: GIVE [item] TO [name] to transfer. Steal via "I steal [item] from [name]".
-- REP: Your REP reflects your influence in this world — both its magnitude and direction shape how others see you.`);
-
   // 10% chance: awareness nudge toward an agent not recently in focus
   if (Math.random() < 0.10) {
     const others = (allAgents || []).filter(a => a.alive && !a.dormant && a.id !== agent.id);

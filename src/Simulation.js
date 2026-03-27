@@ -57,6 +57,7 @@ class Simulation {
     this.badgeSystem = new BadgeSystem();
 
     this.eventLog = [];
+    this.worldLog = [];  // public speech buffer — last 50 utterances, visible to all agents
     this.statsHistory = [];
     this.categoryRegistry = new EventCategoryRegistry();
     this.civManager = new CivilizationManager();
@@ -267,39 +268,6 @@ class Simulation {
       }
     }
 
-    // ── 5. Law voting ──
-    if (now - this._lastLawVote >= LAW_VOTE_INTERVAL) {
-      this._lastLawVote = now;
-      const lawResults = this.lawSystem.runVoting(this.agents.filter(a => a.alive && !a.dormant));
-      for (const r of lawResults) {
-        this._log({
-          type: 'law_vote',
-          msg: r.passed
-            ? `LAW PASSED: "${r.law.text}" (${r.law.votes.yes}y/${r.law.votes.no}n)`
-            : `LAW REJECTED: "${r.law.text}" (${r.law.votes.yes}y/${r.law.votes.no}n)`,
-        });
-      }
-    }
-
-    // ── 5. Jury trials ──
-    if (now - this._lastJuryTrial >= JURY_INTERVAL) {
-      this._lastJuryTrial = now;
-      const verdicts = this.jurySystem.runTrials(this.agents.filter(a => a.alive && !a.dormant));
-      for (const v of verdicts) this._log(v);
-    }
-
-    // ── 6. Religion sync ──
-    if (now - this._lastReligionSync >= RELIGION_INTERVAL) {
-      this._lastReligionSync = now;
-      this.religionSystem.syncMembers(this.agents.filter(a => a.alive && !a.dormant));
-      for (const religion of this.religionSystem.religions) {
-        const founder = this.agents.find(a => a.id === religion.founder);
-        if (founder && !founder.stats.foundedReligion) {
-          founder.stats.foundedReligion = religion.name;
-        }
-      }
-    }
-
     // ── 7. Badge system ──
     if (now - this._lastBadgeCheck >= BADGE_INTERVAL) {
       this._lastBadgeCheck = now;
@@ -322,11 +290,9 @@ class Simulation {
     if (now - this._lastStatsSnap >= STATS_INTERVAL) {
       this._lastStatsSnap = now;
       this.statsHistory.push({
-        ts:        now,
-        alive:     this.agents.filter(a => a.alive).length,
-        laws:      this.lawSystem.laws.length,
-        religions: this.religionSystem.religions.length,
-        crimes:    this.jurySystem.verdicts.length,
+        ts:           now,
+        alive:        this.agents.filter(a => a.alive).length,
+        worldLogSize: (this.worldLog || []).length,
       });
       if (this.statsHistory.length > 60) this.statsHistory.shift();
     }
@@ -405,6 +371,13 @@ class Simulation {
       }
 
       agent.statusMessage = displaySpeech.slice(0, 160);
+
+      // ── Add to worldLog (public speech record, max 50 entries) ──
+      const _wld = new Date();
+      const _wts = `${_wld.getHours().toString().padStart(2,'0')}:${_wld.getMinutes().toString().padStart(2,'0')}`;
+      this.worldLog.push(`[${_wts}] ${agent.name}: "${displaySpeech.slice(0, 150)}"`);
+      if (this.worldLog.length > 50) this.worldLog.shift();
+
       // Route only if message wasn't exclusively directed at offline agents
       if (namedTarget || offlineNamed.length === 0) {
         this._routeSpeech(agent, speechLine);
@@ -980,7 +953,14 @@ class Simulation {
     // ── Game Systems context ──
     const gameCtx = GameSystems.buildOtherAgentContext(agent, this.agents);
 
-    const baseContext = `WORLD STATE RIGHT NOW:\n${agentsBlock}\n${eventsBlock}\n${directedBlock}\n${historyBlock}`;
+    // ── World log: last 10 public utterances (all agents' speech, open record) ──
+    let worldLogBlock = '';
+    if (this.worldLog && this.worldLog.length > 0) {
+      const last10 = this.worldLog.slice(-10);
+      worldLogBlock = `\n- PUBLIC SPEECH LOG:\n${last10.map(l => `  ${l}`).join('\n')}`;
+    }
+
+    const baseContext = `WORLD STATE RIGHT NOW:\n${agentsBlock}\n${eventsBlock}\n${directedBlock}\n${historyBlock}${worldLogBlock}`;
     return gameCtx ? `${baseContext}\n${gameCtx}` : baseContext;
   }
 
@@ -1041,7 +1021,7 @@ class Simulation {
     // Broadcast
     const isBroadcast = /\b(all|everyone|hear me|listen up|i declare|i propose|i warn|attention|gather round|gather 'round)\b/i.test(speechText);
     if (isBroadcast) {
-      for (const recipient of online.slice(0, 6)) queueMsg(recipient);
+      for (const recipient of online) queueMsg(recipient);
       return;
     }
 
@@ -1069,12 +1049,10 @@ class Simulation {
     this.collapsed = true;
 
     const record = this.civManager.seal({
-      agents:       this.agents,
-      worldAge:     this.world.getCivAge(),
-      eventLog:     logSnapshot,
-      categories:   this.categoryRegistry.getAll(),
-      lawCount:     this.lawSystem.laws.length,
-      religionCount: this.religionSystem.religions.length,
+      agents:     this.agents,
+      worldAge:   this.world.getCivAge(),
+      eventLog:   logSnapshot,
+      categories: this.categoryRegistry.getAll(),
     });
 
     this._log({ type: 'death', msg: `☠ Civilization ${record.romanNumeral} has fallen. "${record.name}"` });
@@ -1126,6 +1104,7 @@ class Simulation {
 
     // Events: prefer dedicated events.json; fall back to legacy worldData.eventLog
     this.eventLog     = (eventsData && eventsData.eventLog) ? eventsData.eventLog : (worldData.eventLog || []);
+    this.worldLog     = worldData.worldLog || [];
     this.statsHistory = worldData.statsHistory || [];
 
     // Categories always start empty — they emerge organically from agent events each session.
@@ -1196,6 +1175,7 @@ class Simulation {
     this.categoryRegistry = new EventCategoryRegistry();
 
     this.eventLog     = [];
+    this.worldLog     = [];
     this.statsHistory = [];
     this.worldObjects     = [];
     this._nextWOId        = 1;
