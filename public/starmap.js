@@ -149,6 +149,13 @@ class Starmap {
     this._lineParticles      = new Map();  // pairKey → [{progress, speed, dir}]
     this._lastParticleUpdate = 0;
 
+    // Activity particles — emitted from active agent nodes
+    this._activityParticles = [];   // [{x,y,vx,vy,life,maxLife,r,color,agentId}]
+    this._lastEmitT         = 0;   // timestamp of last emission pass
+
+    // Line energy flows — fast directional dots on recently-active connection lines
+    this._lineFlows         = [];   // [{key,ax,ay,bx,by,progress,speed,color}]
+
     // Dormant fade-out: nodes that are fading away because owner went offline
     // agentId → { x, y, t, agent }
     this._dormantFades = new Map();
@@ -755,6 +762,8 @@ class Starmap {
     }
 
     this._updateLineParticles(t);
+    this._updateActivityParticles(t);
+    this._updateLineFlows(t);
     this._render(t);
   }
 
@@ -787,6 +796,10 @@ class Starmap {
     this._drawFlowers(ctx, t);
     this._drawNovelEffects(ctx, t);
     this._drawWorldObjects(ctx, t);
+
+    // Activity particles and line flows drawn before agent nodes so nodes appear on top
+    this._drawLineFlows(ctx, t);
+    this._drawActivityParticles(ctx);
 
     // At low zoom, replace individual agents with cluster count bubbles
     const CLUSTER_SCALE = 0.45;
@@ -1114,6 +1127,172 @@ class Starmap {
         ctx.fill();
         ctx.restore();
       }
+    }
+  }
+
+  // ── Activity particles — emitted from recently active agent nodes ─────────────
+
+  /** Emit and advance activity particles for agents active in last 2 min. */
+  _updateActivityParticles(t) {
+    const nowMs         = Date.now();
+    const ACTIVE_WINDOW = 120000;   // 2 minutes
+    const EMIT_INTERVAL = 120;      // ms between emission passes
+    const MAX_PARTICLES = 200;
+
+    // Advance existing particles; remove dead ones
+    for (let i = this._activityParticles.length - 1; i >= 0; i--) {
+      const p = this._activityParticles[i];
+      p.x += p.vx;
+      p.y += p.vy;
+      p.life--;
+      if (p.life <= 0) this._activityParticles.splice(i, 1);
+    }
+
+    // Emit new particles for active agents
+    if (t - this._lastEmitT < EMIT_INTERVAL) return;
+    this._lastEmitT = t;
+
+    if (this._activityParticles.length >= MAX_PARTICLES) return;
+
+    for (const [id, nd] of this.nodes) {
+      const lastDec = nd.agent.lastDecisionAt || 0;
+      if (nowMs - lastDec > ACTIVE_WINDOW) continue;   // not recently active
+
+      // Pick agent primary color
+      const color = nd.agent.visualForm?.primaryColor
+        || `hsl(${agentHue(nd.agent)},70%,60%)`;
+
+      // Emit 1-3 particles from the node edge in a random direction
+      const count = 1 + Math.floor(Math.random() * 3);
+      for (let i = 0; i < count; i++) {
+        if (this._activityParticles.length >= MAX_PARTICLES) break;
+        const angle   = Math.random() * Math.PI * 2;
+        const speed   = 0.3 + Math.random() * 0.5;        // px/frame
+        const maxLife = 60 + Math.floor(Math.random() * 61); // 60-120 frames
+        // Spawn at node edge
+        this._activityParticles.push({
+          x:       nd.x + Math.cos(angle) * (NODE_R + 1),
+          y:       nd.y + Math.sin(angle) * (NODE_R + 1),
+          vx:      Math.cos(angle) * speed,
+          vy:      Math.sin(angle) * speed,
+          life:    maxLife,
+          maxLife,
+          r:       1.5 + Math.random(),    // 1.5-2.5 px
+          color,
+          agentId: id,
+        });
+      }
+    }
+  }
+
+  /** Draw activity particles under agent nodes. */
+  _drawActivityParticles(ctx) {
+    for (const p of this._activityParticles) {
+      const alpha = (p.life / p.maxLife) * 0.75;
+      if (alpha <= 0) continue;
+      ctx.save();
+      ctx.globalAlpha = alpha;
+      ctx.fillStyle   = p.color;
+      ctx.shadowColor = p.color;
+      ctx.shadowBlur  = 4;
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, p.r, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.restore();
+    }
+  }
+
+  // ── Line energy flows — fast directional dots for recently communicating pairs ──
+
+  /** Update fast energy flows for connection pairs that exchanged messages < 5 min ago. */
+  _updateLineFlows(t) {
+    const nowMs          = Date.now();
+    const COMM_WINDOW    = 300000;   // 5 minutes
+    const FLOW_SPEED     = 0.0005;   // progress/ms → ~2 sec crossing
+    const dt = Math.min(t - (this._lastFlowT || t), 60);
+    this._lastFlowT = t;
+
+    // Build set of recently-active pair keys
+    const activeFlowKeys = new Set();
+    for (const c of this.connections) {
+      const key   = [c.a, c.b].sort().join('|');
+      const lastTs = this._connLastTs?.get(key) || 0;
+      if (nowMs - lastTs > COMM_WINDOW) continue;
+      activeFlowKeys.add(key);
+    }
+
+    // Advance existing flows
+    for (let i = this._lineFlows.length - 1; i >= 0; i--) {
+      const f = this._lineFlows[i];
+      if (!activeFlowKeys.has(f.key)) {
+        this._lineFlows.splice(i, 1);
+        continue;
+      }
+      f.progress += FLOW_SPEED * dt;
+      if (f.progress >= 1) f.progress -= 1;
+    }
+
+    // Spawn new flows for newly-active pairs (1-2 per pair)
+    const existingKeys = new Set(this._lineFlows.map(f => f.key + ':' + f.idx));
+    for (const c of this.connections) {
+      const key    = [c.a, c.b].sort().join('|');
+      if (!activeFlowKeys.has(key)) continue;
+
+      const ndA = this.nodes.get(c.a);
+      const ndB = this.nodes.get(c.b);
+      if (!ndA || !ndB) continue;
+
+      const lastTs = this._connLastTs?.get(key) || 0;
+      // More flows for more recent comms (1 if > 1 min ago, 2 if very recent)
+      const wantCount = (nowMs - lastTs < 60000) ? 2 : 1;
+      const have = this._lineFlows.filter(f => f.key === key).length;
+      if (have >= wantCount) continue;
+
+      const senderNd  = c.a < c.b ? ndA : ndB;  // deterministic sender
+      const color     = senderNd.agent.visualForm?.primaryColor
+        || `hsl(${agentHue(senderNd.agent)},70%,65%)`;
+
+      this._lineFlows.push({
+        key,
+        idx:      have,
+        progress: Math.random(),    // stagger start positions
+        color,
+      });
+    }
+  }
+
+  /** Draw fast energy-flow dots along recently-active connection lines. */
+  _drawLineFlows(ctx, t) {
+    for (const f of this._lineFlows) {
+      const c = this.connections.find(c => [c.a, c.b].sort().join('|') === f.key);
+      if (!c) continue;
+      const ndA = this.nodes.get(c.a);
+      const ndB = this.nodes.get(c.b);
+      if (!ndA || !ndB) continue;
+
+      const ep = Starmap._edgePoints(ndA, ndB);
+      const dx = ep.bx - ep.ax, dy = ep.by - ep.ay;
+      const px = ep.ax + dx * f.progress;
+      const py = ep.ay + dy * f.progress;
+
+      const pulse = 0.6 + Math.sin(t * 0.004 + f.progress * Math.PI * 3) * 0.4;
+
+      ctx.save();
+      ctx.globalAlpha = pulse * 0.85;
+      ctx.fillStyle   = f.color;
+      ctx.shadowColor = f.color;
+      ctx.shadowBlur  = 10;
+      ctx.beginPath();
+      ctx.arc(px, py, 2.2, 0, Math.PI * 2);
+      ctx.fill();
+      // bright core
+      ctx.globalAlpha = pulse;
+      ctx.fillStyle   = '#ffffff';
+      ctx.shadowBlur  = 4;
+      ctx.beginPath();
+      ctx.arc(px, py, 0.9, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.restore();
     }
   }
 
