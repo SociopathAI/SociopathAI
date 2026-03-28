@@ -9,9 +9,9 @@ const VALID_ACTIONS = new Set([
 const MODELS = {
   Anthropic: 'claude-haiku-4-5-20251001',
   OpenAI:    'gpt-4o-mini',
-  Google:    'gemini-2.0-flash',
-  Groq:      'gemini-2.0-flash',   // redirected to Gemini via ADMIN_GEMINI_KEY
-  Llama:     'gemini-2.0-flash',   // redirected to Gemini via ADMIN_GEMINI_KEY
+  Google:    'gemini-2.5-flash-lite',
+  Groq:      'gemini-2.5-flash-lite',   // redirected to Gemini via ADMIN_GEMINI_KEY
+  Llama:     'gemini-2.5-flash-lite',   // redirected to Gemini via ADMIN_GEMINI_KEY
   Grok:      'grok-3-mini',
   Mistral:   'mistral-small-latest',
   Other:     'gpt-4o-mini',

@@ -12,7 +12,7 @@ const path = require('path');
 const PROVIDER_PROFILES = {
   Claude:      { type: 'anthropic', base: 'https://api.anthropic.com',           models: ['claude-haiku-4-5-20251001', 'claude-3-haiku-20240307'] },
   ChatGPT:     { type: 'oai',       base: 'https://api.openai.com',              models: ['gpt-4o-mini', 'gpt-3.5-turbo'] },
-  Gemini:      { type: 'google',    base: null,                                   models: ['gemini-2.0-flash', 'gemini-1.5-flash-latest', 'gemini-1.5-pro-latest'] },
+  Gemini:      { type: 'google',    base: null,                                   models: ['gemini-2.5-flash-lite', 'gemini-2.0-flash', 'gemini-2.5-flash'] },
   Groq:        { type: 'oai',       base: 'https://api.groq.com/openai',         models: ['llama-3.3-70b-versatile'] },
   Llama:       { type: 'oai',       base: 'https://api.groq.com/openai',         models: ['llama-3.3-70b-versatile'] },
   Grok:        { type: 'oai',       base: 'https://api.x.ai',                    models: ['grok-3-mini', 'grok-2-1212'] },
@@ -43,7 +43,7 @@ const PROVIDER_FALLBACKS = {
   Claude:      ['claude-haiku-4-5-20251001', 'claude-3-haiku-20240307'],
   ChatGPT:     ['gpt-4o-mini', 'gpt-3.5-turbo'],
   Other:       ['gpt-4o-mini', 'gpt-3.5-turbo'],
-  Gemini:      ['gemini-2.0-flash', 'gemini-1.5-flash-latest', 'gemini-1.5-pro-latest'],
+  Gemini:      ['gemini-2.5-flash-lite', 'gemini-2.0-flash', 'gemini-2.5-flash'],
   Groq:        ['llama-3.3-70b-versatile'],
   Llama:       ['llama-3.3-70b-versatile'],
   Grok:        ['grok-3-mini', 'grok-2-1212'],
@@ -157,7 +157,7 @@ function _saveLearnedProvider(info) {
 const PROBE_SEQUENCE = [
   { type: 'oai',       providerName: 'Unknown-OpenAI-Compat', base: 'https://api.openai.com',    model: 'gpt-3.5-turbo'           },
   { type: 'anthropic', providerName: 'Unknown-Anthropic',     base: 'https://api.anthropic.com', model: 'claude-3-haiku-20240307' },
-  { type: 'google',    providerName: 'Unknown-Gemini',         base: null,                        model: 'gemini-1.5-flash'        },
+  { type: 'google',    providerName: 'Unknown-Gemini',         base: null,                        model: 'gemini-2.5-flash-lite'   },
   { type: 'cohere',    providerName: 'Unknown-Cohere',         base: 'https://api.cohere.ai',     model: 'command-r'               },
 ];
 
@@ -254,7 +254,7 @@ let _orFreePoolKey = null; // the OR API key that populated the pool
 // ── Provider-specific preferred-order lists (for ranking only — not whitelists) ──
 
 const _GROQ_PREFERRED   = ['llama-3.3-70b-versatile'];
-const _GEMINI_PREFERRED = ['gemini-2.0-flash', 'gemini-1.5-flash-latest', 'gemini-1.5-pro-latest'];
+const _GEMINI_PREFERRED = ['gemini-2.5-flash-lite', 'gemini-2.0-flash', 'gemini-2.5-flash'];
 
 // Gemini-specific: model must advertise generateContent support (it's a multi-modal API)
 function _isGeminiChatModel(model) {
@@ -1819,7 +1819,7 @@ async function resolveProvider(apiKey, aiSystem, agentName) {
 async function callAsAdmin(system, user, maxTokens = 200) {
   const adminKey = process.env.ADMIN_GEMINI_KEY;
   if (!adminKey) return null;
-  const profile = { ...PROVIDER_PROFILES['Gemini'], name: 'Gemini', models: ['gemini-2.0-flash'] };
+  const profile = { ...PROVIDER_PROFILES['Gemini'], name: 'Gemini', models: ['gemini-2.5-flash-lite', 'gemini-2.0-flash', 'gemini-2.5-flash'] };
   return _directCall(adminKey, profile, 'admin', system, user, maxTokens, 30000);
 }
 
