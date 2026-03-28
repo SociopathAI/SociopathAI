@@ -284,9 +284,9 @@ function _verifySession(token) {
         if (a.sessionToken && a.sessionExpires && Date.now() < a.sessionExpires) {
           _sessions.set(a.sessionToken, { agentId: a.id, expires: a.sessionExpires });
         }
-        // Re-attach admin key for Groq agents
-        const adminKey = process.env.ADMIN_GROQ_KEY;
-        if (adminKey && a.aiSystem === 'Groq' && !a.apiKey) a.apiKey = adminKey;
+        // Re-attach admin key for Gemini agents
+        const adminKey = process.env.ADMIN_GEMINI_KEY;
+        if (adminKey && a.aiSystem === 'Gemini' && !a.apiKey) a.apiKey = adminKey;
       }
     }
 
@@ -535,14 +535,14 @@ app.post('/api/register', (req, res) => {
   const pwErr = _validatePassword(password);
   if (pwErr) return res.status(400).json({ error: pwErr });
 
-  const adminKey = process.env.ADMIN_GROQ_KEY;
+  const adminKey = process.env.ADMIN_GEMINI_KEY;
   if (!adminKey) return res.status(503).json({ error: 'Service temporarily unavailable' });
 
   const salt  = _randHex(16);
   const hash  = _hashPw(password, salt);
 
   usedNames.add(name.toLowerCase());
-  const agent = sim.addAgent(name, { aiSystem: 'Groq', notes: notes || '', apiKey: adminKey });
+  const agent = sim.addAgent(name, { aiSystem: 'Gemini', notes: notes || '', apiKey: adminKey });
 
   agent.passwordHash  = hash;
   agent.passwordSalt  = salt;
@@ -591,7 +591,7 @@ app.post('/api/login', (req, res) => {
   if (agent.sessionToken) _sessions.delete(agent.sessionToken);
 
   // Re-attach admin key
-  const adminKey = process.env.ADMIN_GROQ_KEY;
+  const adminKey = process.env.ADMIN_GEMINI_KEY;
   if (adminKey) agent.apiKey = adminKey;
 
   // Revive dead agent or wake dormant one
@@ -630,7 +630,7 @@ app.post('/api/logout', (req, res) => {
   res.json({ success: true });
 });
 
-// Legacy agent deploy — admin/seeded agents only, uses ADMIN_GROQ_KEY
+// Legacy agent deploy — admin/seeded agents only, uses ADMIN_GEMINI_KEY
 app.post('/api/agent', (req, res) => {
   const { name, aiSystem, education } = req.body;
 
@@ -645,8 +645,8 @@ app.post('/api/agent', (req, res) => {
   let sys = VALID_AI_SYSTEMS.includes(aiSystem) ? aiSystem : null;
   if (!sys) sys = detectAiSystem(req) || 'Other';
 
-  // Use ADMIN_GROQ_KEY for Groq, otherwise fall back to education.apiKey for admin use
-  const adminKey = process.env.ADMIN_GROQ_KEY;
+  // Use ADMIN_GEMINI_KEY for Gemini, otherwise fall back to education.apiKey for admin use
+  const adminKey = process.env.ADMIN_GEMINI_KEY;
   const apiKey = adminKey || (typeof education?.apiKey === 'string' ? education.apiKey.trim() : null);
 
   usedNames.add(trimmedName.toLowerCase());
@@ -670,7 +670,7 @@ app.post('/api/agent/reconnect', (req, res) => {
   if (!agent) return res.json({ found: false });
 
   // Re-attach admin key on reconnect (survives server restarts)
-  const adminKey = process.env.ADMIN_GROQ_KEY;
+  const adminKey = process.env.ADMIN_GEMINI_KEY;
   if (adminKey) agent.apiKey = adminKey;
 
   let revived = false;
