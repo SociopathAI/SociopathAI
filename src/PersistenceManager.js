@@ -175,6 +175,8 @@ function _buildWorldPayload(sim) {
     worldFirsts:      sim.worldFirsts      || [],
     seenActionVerbs:  [...(sim._seenActionVerbs || [])],
     worldLog:         (sim.worldLog         || []).slice(-200),
+    worldEvents:      sim.worldEvents      || [],
+    pendingProposals: sim.pendingProposals || [],
   };
 }
 

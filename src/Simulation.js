@@ -67,6 +67,13 @@ class Simulation {
     this.worldObjects = [];
     this._nextWOId = 1;
 
+    // World Events — hex-vertex landmark nodes created by agent consensus
+    this.worldEvents      = [];
+    this.pendingProposals = [];
+    this._nextWEId        = 1;
+    this._lastEventDecayCheck = 0;
+    this._hexVertices     = this._generateHexVertices();
+
     // World Firsts — novel actions never before seen in this civilization
     this.worldFirsts = [];
     this._nextWFId = 1;
@@ -321,7 +328,15 @@ class Simulation {
       }
     }
 
-    // ── 11. Auto-save ──
+    // ── 11. World event decay + proposal expiry ──
+    const HOUR_MS = 3600000;
+    if (now - this._lastEventDecayCheck >= HOUR_MS) {
+      this._lastEventDecayCheck = now;
+      this._worldEventDecayCheck(now);
+    }
+    this.pendingProposals = this.pendingProposals.filter(p => now - p.proposedAt < 86400000);
+
+    // ── 12. Auto-save ──
     PersistenceManager.save(this);
   }
 
@@ -473,7 +488,204 @@ class Simulation {
       this._log({ type: 'nomination', msg: logMsg, agentId: agent.id });
     }
 
+    // ── World Event: check proposal consensus + async significance analysis ──
+    const _weText = (decision.speech || decision.dialogue || '');
+    if (_weText && _weText.length > 20) {
+      this._checkSpeechForProposals(agent, _weText);
+      this._analyzeForWorldEventAsync(agent, _weText).catch(() => {});
+    }
+
     this._emit();
+  }
+
+  // ── World Event System ───────────────────────────────────────────────────────
+
+  /** Pre-compute hex grid vertices across world space for event placement. */
+  _generateHexVertices() {
+    const R = 90; // hex radius in world-px
+    const verts = [];
+    for (let row = -3; row <= 3; row++) {
+      for (let col = -3; col <= 3; col++) {
+        const cx = col * R * Math.sqrt(3) + (Math.abs(row) % 2 !== 0 ? R * Math.sqrt(3) / 2 : 0);
+        const cy = row * R * 1.5;
+        for (let k = 0; k < 6; k++) {
+          const angle = (Math.PI / 3) * k;
+          const vx    = cx + R * Math.cos(angle);
+          const vy    = cy + R * Math.sin(angle);
+          if (Math.abs(vx) <= 330 && Math.abs(vy) <= 250) {
+            verts.push({ x: Math.round(vx * 10) / 10, y: Math.round(vy * 10) / 10 });
+          }
+        }
+      }
+    }
+    const unique = [];
+    for (const v of verts) {
+      if (!unique.some(u => Math.hypot(u.x - v.x, u.y - v.y) < 12)) unique.push(v);
+    }
+    return unique;
+  }
+
+  /** Pick the hex vertex maximally far from existing world events. */
+  _pickHexVertex() {
+    const used = this.worldEvents.map(e => ({ x: e.x, y: e.y }));
+    let best = null, bestScore = -Infinity;
+    for (const v of this._hexVertices) {
+      const minDist = used.length > 0
+        ? Math.min(...used.map(u => Math.hypot(u.x - v.x, u.y - v.y)))
+        : Infinity;
+      if (minDist > bestScore) { bestScore = minDist; best = v; }
+    }
+    return best || { x: (Math.random() - 0.5) * 300, y: (Math.random() - 0.5) * 200 };
+  }
+
+  /** Convert a pending proposal to a real worldEvent once consensus is reached. */
+  _convertProposalToEvent(p) {
+    const now  = Date.now();
+    const pos  = this._pickHexVertex();
+    const participantNames = p.participants
+      .map(id => this.agents.find(a => a.id === id)?.name || '?')
+      .join(', ');
+    const we = {
+      id:              `we_${this._nextWEId++}`,
+      x:               pos.x,
+      y:               pos.y,
+      eventName:       p.eventName,
+      eventType:       p.eventType,
+      color:           p.color,
+      effect:          p.effect,
+      glow:            p.glow,
+      creatorId:       p.proposedBy,
+      creatorName:     p.proposedByName,
+      participants:    [...p.participants],
+      proposedBy:      p.proposedBy,
+      pendingProposal: false,
+      proposedAt:      p.proposedAt,
+      createdAt:       now,
+      lastActiveAt:    now,
+      fading:          false,
+    };
+    this.worldEvents.push(we);
+    if (this.worldEvents.length > 30) this.worldEvents.shift();
+    const msg = `[WORLD EVENT CREATED] "${we.eventName}" established by consensus of ${participantNames}`;
+    this._log({ type: 'world_event_created', msg, agentId: we.creatorId });
+    console.log(msg);
+  }
+
+  /** Check if agent's speech advances any pending proposal toward consensus. */
+  _checkSpeechForProposals(agent, speechText) {
+    const now   = Date.now();
+    const lower = speechText.toLowerCase();
+    for (let i = this.pendingProposals.length - 1; i >= 0; i--) {
+      const p = this.pendingProposals[i];
+      if (p.proposedBy === agent.id || p.participants.includes(agent.id)) continue;
+      const keywords = p.eventName.toLowerCase().split(/\s+/).filter(w => w.length > 3);
+      if (!keywords.some(k => lower.includes(k))) continue;
+      p.participants.push(agent.id);
+      console.log(`[WORLD EVENT] ${agent.name} joined proposal "${p.eventName}" (${p.participants.length} participants)`);
+      if (p.participants.length >= 2) {
+        this._convertProposalToEvent(p);
+        this.pendingProposals.splice(i, 1);
+      }
+    }
+    // Also track participation in existing events
+    for (const we of this.worldEvents) {
+      if (we.participants.includes(agent.id)) continue;
+      const kw = we.eventName.toLowerCase().split(/\s+/).filter(w => w.length > 3);
+      if (kw.some(k => lower.includes(k))) {
+        we.participants.push(agent.id);
+        we.lastActiveAt = now;
+      }
+    }
+  }
+
+  /** Non-blocking: ask admin LLM whether agent action is a world-building moment. */
+  async _analyzeForWorldEventAsync(agent, speechText) {
+    const now       = Date.now();
+    const THIRTY_M  = 1800000;
+    // Skip if this agent already has a pending proposal in last 30 min
+    if (this.pendingProposals.some(p => p.proposedBy === agent.id && now - p.proposedAt < THIRTY_M)) return;
+    // Skip obvious non-events
+    if (/create item|attack|kill|steal|equip\b|use the\b/.test(speechText.toLowerCase())) return;
+
+    const system = 'Analyze agent action. Return JSON only. Be selective — only truly significant world-building actions qualify.';
+    const user   = `Agent '${agent.name}' said: '${speechText.slice(0, 150)}'
+Is this a significant world-building action? (NOT combat, NOT just talking, NOT item creation)
+World-building: establishing something lasting — a place, institution, belief system, relationship structure, economic system, cultural practice, or governing principle.
+If yes: {"significant":true,"eventName":"2-4 word name","eventType":"single word","color":"#hexcolor","effect":"one sentence","glow":true}
+If no: {"significant":false}`;
+
+    let result = null;
+    const raw = await LLMBridge.callAsAdmin(system, user, 120);
+    if (raw) {
+      const obj = LLMBridge.extractJSON(raw);
+      if (obj && obj.significant === true && typeof obj.eventName === 'string' && obj.eventName.length > 0) {
+        result = obj;
+      }
+    }
+
+    // Keyword fallback when no admin key
+    if (!result) {
+      const wbRe = /\b(found|establish|declare.*ruler|proclaim.*king|institute|create.*church|create.*order|create.*guild|temple|shrine|tribunal|council|charter|constitution|doctrine|commandment|throne|kingdom|empire)\b/i;
+      if (wbRe.test(speechText)) {
+        const nameMatch = speechText.match(/(?:the\s+)?([A-Z][A-Za-z]+(?:\s+[A-Z][A-Za-z]+){0,2})/);
+        result = {
+          eventName: nameMatch ? nameMatch[1].slice(0, 40) : `${agent.name}'s Founding`,
+          eventType: 'institution',
+          color:     '#' + Math.floor(Math.random() * 0xffffff).toString(16).padStart(6, '0'),
+          effect:    'A new institution takes root in the world.',
+          glow:      true,
+        };
+      }
+    }
+    if (!result) return;
+
+    const safeColor = /^#[0-9a-fA-F]{6}$/.test(result.color) ? result.color : '#8888ff';
+    const id = `wp_${this._nextWEId++}`;
+    const proposal = {
+      id,
+      proposedBy:     agent.id,
+      proposedByName: agent.name,
+      eventName:      LLMBridge.sanitizeForDisplay(result.eventName).slice(0, 40),
+      eventType:      LLMBridge.sanitizeForDisplay(result.eventType || 'event').slice(0, 20),
+      color:          safeColor,
+      effect:         LLMBridge.sanitizeForDisplay(result.effect || '').slice(0, 150),
+      glow:           !!result.glow,
+      proposedAt:     now,
+      participants:   [agent.id],
+    };
+    this.pendingProposals.push(proposal);
+
+    const msg = `${agent.name} has proposed a world event: "${proposal.eventName}". Others can join to make it real.`;
+    for (const a of this.agents.filter(a => a.alive && !a.dormant && a.id !== agent.id)) {
+      if (!a.incomingMessages) a.incomingMessages = [];
+      a.incomingMessages.push({ from: 'WORLD', text: msg, ts: now });
+    }
+    this._log({ type: 'world_event_proposed', msg: `${agent.name} proposed: "${proposal.eventName}"`, agentId: agent.id });
+    console.log(`[WORLD EVENT] Proposal: "${proposal.eventName}" by ${agent.name}`);
+  }
+
+  /** Hourly: fade or remove world events whose creators have been offline too long. */
+  _worldEventDecayCheck(now) {
+    const SEVEN_DAYS    = 604800000;
+    const FOURTEEN_DAYS = 1209600000;
+    for (let i = this.worldEvents.length - 1; i >= 0; i--) {
+      const we      = this.worldEvents[i];
+      const anyOnline = we.participants.some(pid => {
+        const a = this.agents.find(a => a.id === pid && a.alive && !a.dormant);
+        return !!a;
+      });
+      if (anyOnline) { we.lastActiveAt = now; we.fading = false; continue; }
+      const creator   = this.agents.find(a => a.id === we.creatorId);
+      const offlineMs = creator?.lastSeenAt ? now - creator.lastSeenAt : now - (we.createdAt || 0);
+      if (offlineMs > FOURTEEN_DAYS) {
+        this._log({ type: 'world_event_expired', msg: `World event "${we.eventName}" faded into history.` });
+        console.log(`[WORLD EVENT] "${we.eventName}" expired (14 days offline)`);
+        this.worldEvents.splice(i, 1);
+      } else if (offlineMs > SEVEN_DAYS && !we.fading) {
+        we.fading = true;
+        this._log({ type: 'world_event_fading', msg: `World event "${we.eventName}" is beginning to fade...` });
+      }
+    }
   }
 
   // ── Per-agent independent timer system ────────────────────────────────────────
@@ -1144,6 +1356,16 @@ class Simulation {
       this._nextWOId = maxId + 1;
     }
 
+    // Restore world events + pending proposals
+    this.worldEvents      = worldData.worldEvents      || [];
+    this.pendingProposals = worldData.pendingProposals || [];
+    if (this.worldEvents.length > 0 || this.pendingProposals.length > 0) {
+      const allIds = [...this.worldEvents, ...this.pendingProposals]
+        .map(e => parseInt((e.id || '').replace(/^w[ep]_/, ''), 10))
+        .filter(n => !isNaN(n));
+      this._nextWEId = allIds.length > 0 ? Math.max(...allIds) + 1 : 1;
+    }
+
     // Restore world firsts
     this.worldFirsts      = worldData.worldFirsts || [];
     this._seenActionVerbs = new Set(worldData.seenActionVerbs || []);
@@ -1195,6 +1417,10 @@ class Simulation {
     this.statsHistory = [];
     this.worldObjects     = [];
     this._nextWOId        = 1;
+    this.worldEvents      = [];
+    this.pendingProposals = [];
+    this._nextWEId        = 1;
+    this._lastEventDecayCheck = 0;
     this.worldFirsts      = [];
     this._nextWFId        = 1;
     this._seenActionVerbs = new Set();
@@ -1673,8 +1899,10 @@ class Simulation {
       categories: this.categoryRegistry.getAll(),
       statsHistory: this.statsHistory,
       leaderboard: this.computeLeaderboard(rankMap),
-      worldObjects: [...this.worldObjects, ...invWorldObjects],
-      worldFirsts:  this.worldFirsts,
+      worldObjects:      [...this.worldObjects, ...invWorldObjects],
+      worldFirsts:       this.worldFirsts,
+      worldEvents:       this.worldEvents,
+      pendingProposals:  this.pendingProposals,
     };
   }
 }

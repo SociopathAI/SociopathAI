@@ -156,6 +156,12 @@ class Starmap {
     // Line energy flows — fast directional dots on recently-active connection lines
     this._lineFlows         = [];   // [{key,ax,ay,bx,by,progress,speed,color}]
 
+    // World Events — hex-vertex landmark nodes (confirmed events + pending proposals)
+    this.worldEvents      = [];
+    this.pendingProposals = [];
+    this._selectedWorldEvent  = null;   // currently clicked event (for popup)
+    this._wePopupEl           = this._createWEPopup();
+
     // Dormant fade-out: nodes that are fading away because owner went offline
     // agentId → { x, y, t, agent }
     this._dormantFades = new Map();
@@ -412,6 +418,10 @@ class Starmap {
         this.nodes.get(a.id).agent = a;
       }
     }
+
+    // World Events + pending proposals
+    this.worldEvents      = Array.isArray(state.worldEvents)      ? state.worldEvents      : [];
+    this.pendingProposals = Array.isArray(state.pendingProposals) ? state.pendingProposals : [];
 
     // Connections — guard against missing/null
     this.connections = Array.isArray(state.connections) ? state.connections : [];
@@ -791,6 +801,7 @@ class Starmap {
 
     this._drawQuantumBackground(ctx, t);
     this._drawConnections(ctx, t);
+    this._drawWorldEvents(ctx, t);
     this._drawLineParticles(ctx, t);
     this._drawSignals(ctx, t);
     this._drawFlowers(ctx, t);
@@ -1331,6 +1342,202 @@ class Starmap {
         );
         ctx.fill();
       }
+      ctx.restore();
+    }
+  }
+
+  // ── World Event System ──────────────────────────────────────────────────────
+
+  _createWEPopup() {
+    const el = document.createElement('div');
+    el.style.cssText = [
+      'position:fixed','pointer-events:none','display:none',
+      'background:rgba(4,8,20,0.97)','border:1px solid rgba(100,160,255,0.5)',
+      'border-radius:10px','padding:12px 16px','font-family:"JetBrains Mono",monospace',
+      'z-index:9000','max-width:280px','box-shadow:0 0 24px rgba(60,120,255,0.3)',
+      'color:#c8d8f0','word-break:break-word',
+    ].join(';');
+    document.body.appendChild(el);
+    return el;
+  }
+
+  _showWEPopup(ev, sx, sy, isPending) {
+    const el = this._wePopupEl;
+    const now = Date.now();
+    const ageMs  = ev.createdAt ? now - ev.createdAt : 0;
+    const ageStr = ageMs < 3600000
+      ? Math.round(ageMs / 60000) + ' min ago'
+      : ageMs < 86400000 ? Math.round(ageMs / 3600000) + ' hours ago'
+      : Math.round(ageMs / 86400000) + ' days ago';
+    const creator   = ev.creatorName || ev.proposedByName || '?';
+    const partCount = (ev.participants || []).length;
+
+    if (isPending) {
+      el.innerHTML =
+        `<div style="font-size:9px;letter-spacing:1px;color:#888;margin-bottom:4px">PROPOSAL</div>` +
+        `<div style="font-size:13px;font-weight:bold;color:#ddeeff;margin-bottom:6px">${ev.eventName}</div>` +
+        (ev.effect ? `<div style="font-size:10px;color:rgba(200,220,255,0.75);margin-bottom:6px">${ev.effect}</div>` : '') +
+        `<div style="font-size:9px;color:#6688aa">Proposed by <b style="color:#aaccff">${creator}</b></div>` +
+        `<div style="font-size:9px;color:#ff9955;margin-top:4px">⏳ Awaiting 1 more participant…</div>`;
+    } else {
+      const creatorNd = this.nodes.get(ev.creatorId);
+      const isOnline  = !!creatorNd;
+      const isFading  = ev.fading;
+      const partNames = (ev.participants || [])
+        .map(id => { const n = this.nodes.get(id); return n ? n.agent.name : null; })
+        .filter(Boolean);
+      el.innerHTML =
+        `<div style="font-size:9px;letter-spacing:1px;color:${ev.color};margin-bottom:4px">${(ev.eventType || 'EVENT').toUpperCase()}</div>` +
+        `<div style="font-size:14px;font-weight:bold;color:#fff;margin-bottom:6px">${ev.eventName}</div>` +
+        (ev.effect ? `<div style="font-size:10px;color:rgba(200,220,255,0.8);margin-bottom:8px">${ev.effect}</div>` : '') +
+        `<div style="font-size:9px;color:#6688aa">Founded by <b style="color:#aaccff">${creator}</b> ` +
+        `<span style="color:${isOnline ? '#33ff88' : '#ff6644'}">${isOnline ? '● online' : '○ offline'}</span></div>` +
+        (partNames.length > 0
+          ? `<div style="font-size:9px;color:${ev.color};margin-top:4px">Participants: ${partNames.join(', ')}</div>`
+          : '') +
+        `<div style="font-size:9px;color:#556677;margin-top:4px">${partCount} participant${partCount !== 1 ? 's' : ''}` +
+        (isFading ? ' · <span style="color:#ff8844">⚠ fading</span>' : '') + `</div>` +
+        (ev.createdAt ? `<div style="font-size:8px;color:#445566;margin-top:3px">Created ${ageStr}</div>` : '');
+    }
+    el.style.display = 'block';
+    const W  = window.innerWidth, H = window.innerHeight;
+    const ew = el.offsetWidth + 16, eh = el.offsetHeight + 16;
+    el.style.left = (sx + 14 + ew > W ? sx - ew : sx + 14) + 'px';
+    el.style.top  = (sy + 14 + eh > H ? sy - eh : sy + 14) + 'px';
+  }
+
+  _hideWEPopup() {
+    this._wePopupEl.style.display = 'none';
+    this._selectedWorldEvent = null;
+  }
+
+  _drawWorldEvents(ctx, t) {
+    const hl = this.highlightedAgent || this._hoverHighlightId;
+
+    // ── Draw pending proposals ──
+    for (const p of this.pendingProposals) {
+      const nd = this.nodes.get(p.proposedBy);
+      if (!nd) continue;
+      const px = nd.x + 26, py = nd.y - 22;
+      const pulse = 0.4 + Math.sin(t * 0.003 + nd.x) * 0.25;
+      ctx.save();
+      ctx.globalAlpha = pulse;
+      // Dashed gray ring
+      ctx.strokeStyle = 'rgba(140,160,180,0.7)';
+      ctx.lineWidth   = 1;
+      ctx.setLineDash([4, 3]);
+      ctx.beginPath(); ctx.arc(px, py, 9, 0, Math.PI * 2); ctx.stroke();
+      ctx.setLineDash([]);
+      // Central dot
+      ctx.fillStyle   = 'rgba(160,180,200,0.85)';
+      ctx.shadowColor = 'rgba(140,160,200,0.5)';
+      ctx.shadowBlur  = 8;
+      ctx.beginPath(); ctx.arc(px, py, 3.5, 0, Math.PI * 2); ctx.fill();
+      ctx.restore();
+      // Label
+      ctx.save();
+      ctx.font          = '6px monospace';
+      ctx.fillStyle     = 'rgba(160,180,200,0.65)';
+      ctx.textAlign     = 'center';
+      ctx.textBaseline  = 'top';
+      ctx.fillText('⏳', px, py + 11);
+      ctx.restore();
+    }
+
+    // ── Draw confirmed world events ──
+    for (const we of this.worldEvents) {
+      const isFading = we.fading;
+      const creatorNd = this.nodes.get(we.creatorId);
+      const anyParticipantOnline = (we.participants || []).some(pid => this.nodes.has(pid));
+      const fullColor = we.color || '#8888ff';
+
+      // Global alpha for fading
+      const baseAlpha = isFading ? 0.4 : 1.0;
+      // Node pulse
+      const nr = 7 + Math.sin(t * 0.004 + we.x * 0.02) * 2;
+
+      ctx.save();
+      ctx.globalAlpha = baseAlpha;
+
+      // ── Participant connection lines (max 5, thin dashed) ──
+      const partIds = (we.participants || []).slice(0, 5);
+      for (const pid of partIds) {
+        const pnd = this.nodes.get(pid);
+        if (!pnd) continue;
+        ctx.save();
+        ctx.globalAlpha = baseAlpha * 0.55;
+        ctx.strokeStyle = isFading ? 'rgba(120,120,120,0.45)' : hexRgba(fullColor, 0.55);
+        ctx.lineWidth   = 1;
+        ctx.setLineDash([5, 4]);
+        ctx.beginPath();
+        ctx.moveTo(pnd.x, pnd.y);
+        ctx.lineTo(we.x, we.y);
+        ctx.stroke();
+        ctx.setLineDash([]);
+        ctx.restore();
+      }
+
+      // ── Highlighted agent bright connection line ──
+      if (hl && (we.creatorId === hl || (we.participants || []).includes(hl))) {
+        const agNd = this.nodes.get(hl);
+        if (agNd) {
+          ctx.save();
+          const la = 0.6 + Math.sin(t * 0.005) * 0.3;
+          ctx.strokeStyle = hexRgba(fullColor, la);
+          ctx.lineWidth   = 2;
+          ctx.shadowColor = hexRgba(fullColor, 0.8);
+          ctx.shadowBlur  = 10;
+          ctx.beginPath();
+          ctx.moveTo(agNd.x, agNd.y);
+          ctx.lineTo(we.x, we.y);
+          ctx.stroke();
+          ctx.restore();
+        }
+      }
+
+      // ── Outer glow ──
+      if (we.glow && !isFading) {
+        const glowA = 0.15 + Math.sin(t * 0.003 + we.y * 0.02) * 0.08;
+        const grd = ctx.createRadialGradient(we.x, we.y, 0, we.x, we.y, nr * 5);
+        grd.addColorStop(0,   hexRgba(fullColor, 0.35 + glowA));
+        grd.addColorStop(0.5, hexRgba(fullColor, 0.12));
+        grd.addColorStop(1,   hexRgba(fullColor, 0));
+        ctx.fillStyle = grd;
+        ctx.beginPath(); ctx.arc(we.x, we.y, nr * 5, 0, Math.PI * 2); ctx.fill();
+      }
+
+      // ── Main node ──
+      const nodeColor = isFading
+        ? 'rgba(120,120,120,0.7)'
+        : (!creatorNd && anyParticipantOnline)
+          ? hexRgba(fullColor, 0.7)
+          : fullColor;
+      ctx.shadowColor = isFading ? 'rgba(100,100,100,0.5)' : hexRgba(fullColor, 0.8);
+      ctx.shadowBlur  = isFading ? 4 : (we.glow ? 18 : 8);
+      ctx.fillStyle   = nodeColor;
+      ctx.beginPath(); ctx.arc(we.x, we.y, nr, 0, Math.PI * 2); ctx.fill();
+
+      // Inner bright core
+      ctx.shadowBlur  = 0;
+      ctx.fillStyle   = isFading ? 'rgba(200,200,200,0.4)' : 'rgba(255,255,255,0.7)';
+      ctx.beginPath(); ctx.arc(we.x, we.y, nr * 0.35, 0, Math.PI * 2); ctx.fill();
+
+      // ── Event type label ──
+      ctx.font         = '8px monospace';
+      ctx.fillStyle    = isFading ? 'rgba(140,140,140,0.7)' : hexRgba(fullColor, 0.9);
+      ctx.textAlign    = 'center';
+      ctx.textBaseline = 'top';
+      ctx.shadowBlur   = 0;
+      ctx.fillText((we.eventType || 'EVENT').toUpperCase().slice(0, 12), we.x, we.y + nr + 4);
+
+      // ── Participant count dots ──
+      const dots = Math.min(we.participants?.length || 0, 5);
+      for (let i = 0; i < dots; i++) {
+        const dx = (i - (dots - 1) / 2) * 5;
+        ctx.fillStyle = isFading ? 'rgba(120,120,120,0.5)' : hexRgba(fullColor, 0.7);
+        ctx.beginPath(); ctx.arc(we.x + dx, we.y - nr - 5, 2, 0, Math.PI * 2); ctx.fill();
+      }
+
       ctx.restore();
     }
   }
@@ -2586,6 +2793,30 @@ class Starmap {
         }
       }
 
+      // ── World Event hit test ──
+      const WE_HIT_W = 14 / this.cam.scale;
+      for (const we of this.worldEvents) {
+        if (Math.hypot(wx - we.x, wy - we.y) < WE_HIT_W) {
+          this._hideWEPopup();
+          this._selectedWorldEvent = we;
+          const cr = cv.getBoundingClientRect();
+          this._showWEPopup(we, cr.left + we.x * this.cam.scale + this.cam.panX, cr.top + we.y * this.cam.scale + this.cam.panY, false);
+          return;
+        }
+      }
+      for (const p of this.pendingProposals) {
+        const pnd = this.nodes.get(p.proposedBy);
+        if (!pnd) continue;
+        const ppx = pnd.x + 26, ppy = pnd.y - 22;
+        if (Math.hypot(wx - ppx, wy - ppy) < WE_HIT_W) {
+          this._hideWEPopup();
+          this._selectedWorldEvent = p;
+          const cr = cv.getBoundingClientRect();
+          this._showWEPopup(p, cr.left + ppx * this.cam.scale + this.cam.panX, cr.top + ppy * this.cam.scale + this.cam.panY, true);
+          return;
+        }
+      }
+
       // ── Agent node hit test — always checked BEFORE connection click ──
       // Nodes take priority: a click within 40px of any node always selects that node.
       const HIT_R_SCREEN = 40;
@@ -2622,6 +2853,7 @@ class Starmap {
         if (this.onAgentClick) this.onAgentClick(newHl);
       } else {
         // Clicked empty space — hide ALL objects
+        this._hideWEPopup();
         if (this._openedWObj) {
           this._openedWObj = null;
           if (this.onObjectClose) this.onObjectClose();
