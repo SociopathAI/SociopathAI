@@ -120,7 +120,7 @@ class Simulation {
     const notesPart   = education.notes ? ` Education: "${education.notes}"` : '';
     this._log({
       type: 'join',
-      msg: `${displayName} [${agent.aiSystem}] joined the world.${notesPart}`,
+      msg: `${displayName} joined the world.${notesPart}`,
       agentId: agent.id,
       educationNotes: education.notes || '',
     });
@@ -370,7 +370,7 @@ class Simulation {
         // Directed message to online agent — log as 'dialogue'
         this._log({
           type:           'dialogue',
-          msg:            `${agent.name} [${agent.aiSystem}]: "${displaySpeech}"`,
+          msg:            `${agent.name}: "${displaySpeech}"`,
           rawMsg:         speechLine,
           agentId:        agent.id,
           partnerAgentId: namedTarget.id,
@@ -379,7 +379,7 @@ class Simulation {
         // Monologue — no online agent named (includes offline-only mentions which are ignored)
         this._log({
           type:    'speech',
-          msg:     `${agent.name} [${agent.aiSystem}]: "${displaySpeech}"`,
+          msg:     `${agent.name}: "${displaySpeech}"`,
           rawMsg:  speechLine,
           agentId: agent.id,
         });
@@ -979,7 +979,7 @@ If no: {"significant":false}`;
           agent.statusMessage = msg;
           this._log({
             type: 'intro',
-            msg: `${agent.name} [${agent.aiSystem}] introduces: "${msg}"`,
+            msg: `${agent.name} introduces: "${msg}"`,
             rawMsg: msg,
             agentId: agent.id,
           });
@@ -1002,7 +1002,7 @@ If no: {"significant":false}`;
       if (!existing.incomingMessages) existing.incomingMessages = [];
       existing.incomingMessages.push({
         from: newAgent.name,
-        text: `A new presence has entered this world: ${newAgent.name} (${newAgent.aiSystem || 'AI'}). REP: 0. They are unknown to you.`,
+        text: `A new presence has entered this world: ${newAgent.name}. REP: 0. They are unknown to you.`,
         ts,
       });
     }

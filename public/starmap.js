@@ -279,15 +279,13 @@ class Starmap {
 
   _showAgentTooltip(nd, sx, sy) {
     const a      = nd.agent;
-    const sys    = a.aiSystem || 'AI';
     const rep    = a.rep ?? 0;
     const repStr = formatRep(rep);
     const status = a.statusMessage || a.speech || null;
     const eduNotes = a.educationNotes || null;
     const el     = this._tooltipEl;
     el.innerHTML =
-      `<b style="color:#e8f4ff">${a.symbol ? a.symbol + ' ' : ''}${a.name}</b>` +
-      `<span style="margin-left:6px;font-size:9px;opacity:0.7">${sys}</span>\n` +
+      `<b style="color:#e8f4ff">${a.symbol ? a.symbol + ' ' : ''}${a.name}</b>\n` +
       `REP <b style="color:${rep < 0 ? '#f85149' : '#3fb950'}">${repStr}</b>` +
       (a.age ? ` · age <b>${a.age}</b>` : '') +
       (status ? `\n<span style="color:#88aacc;font-style:italic">"${status}"</span>` : '') +
@@ -2267,10 +2265,6 @@ class Starmap {
       ctx.fillText(a.name, sx, sy - (labelNR + 4) * sc - 2);
 
       // AI system tag (smaller)
-      ctx.font      = '8px "JetBrains Mono",monospace';
-      ctx.fillStyle = 'rgba(110,145,190,0.55)';
-      ctx.fillText(a.aiSystem || '', sx, sy - (labelNR + 15) * sc - 2);
-
       // Hunger warning below node
       if (a.hungerStage && a.hungerStage !== 'healthy') {
         const stagePal = { hungry:'220,185,50', starving:'255,130,30', critical:'255,50,50' };

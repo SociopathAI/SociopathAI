@@ -635,7 +635,6 @@ function _warAllianceBadge(agent) {
 
 function _buildAliveCard(agent, rank) {
   const starHtml   = `<span class="agent-rank-star">${starSVG(rank, 26)}</span>`;
-  const aiBadge    = `<span class="ai-chip ${esc(agent.aiSystem)}">${esc(agent.aiSystem)}</span>`;
   const testBadge  = '';
   const badgeHtml  = _buildBadgeSection(agent.badges);
   const rel = esc(agent.beliefs.religion);
@@ -660,7 +659,6 @@ function _buildAliveCard(agent, rank) {
         <div class="agent-name-row">
           ${starHtml}${agent.symbol || ''}
           <span class="agent-name">${esc(agent.name)}</span>
-          ${aiBadge}
           ${testBadge}
           ${llmDot}
         </div>
@@ -773,13 +771,11 @@ function _patchAliveCard(el, agent, rank) {
 }
 
 function _buildOfflineCard(agent) {
-  const aiBadge = `<span class="ai-chip ${esc(agent.aiSystem)}">${esc(agent.aiSystem)}</span>`;
   return `
   <div class="offline-card">
     <div class="offline-card-left">
       ${agent.symbol || ''}
       <span class="offline-card-name">${esc(agent.name)}</span>
-      ${aiBadge}
     </div>
     <div style="display:flex;align-items:center;gap:6px">
       <span class="offline-card-energy">${_repLabel(agent)}</span>
@@ -789,7 +785,6 @@ function _buildOfflineCard(agent) {
 }
 
 function _buildDeadCard(agent) {
-  const aiBadge = `<span class="ai-chip ${esc(agent.aiSystem)}">${esc(agent.aiSystem)}</span>`;
   return `
   <div class="agent-card dead-card" data-dead-agent-id="${esc(agent.id)}" title="Click to view death report">
     <div class="agent-top">
@@ -798,7 +793,6 @@ function _buildDeadCard(agent) {
           <span class="dead-icon">&#9760;</span>
           ${agent.symbol || ''}
           <span class="agent-name">${esc(agent.name)}</span>
-          ${aiBadge}
         </div>
       </div>
       <div class="agent-right">
@@ -1913,10 +1907,6 @@ function _renderEvLogDlgList(threads, myNames, agentSystems, agentColorMap) {
     const [nameA, nameB] = thread.partners;
     const colorA   = agentColorMap[nameA] || '#888';
     const colorB   = agentColorMap[nameB] || '#888';
-    const sysA     = esc(agentSystems[nameA] || '');
-    const sysB     = esc(agentSystems[nameB] || '');
-    const badgeA   = sysA ? `<span class="ai-chip ${sysA}">${sysA}</span>` : '';
-    const badgeB   = sysB ? `<span class="ai-chip ${sysB}">${sysB}</span>` : '';
     const initA    = esc((nameA || '?')[0].toUpperCase());
     const initB    = esc((nameB || '?')[0].toUpperCase());
     const myClass  = thread.partners.some(p => myNames.has(p)) ? ' convo-my-thread' : '';
@@ -1929,9 +1919,9 @@ function _renderEvLogDlgList(threads, myNames, agentSystems, agentColorMap) {
         </div>
         <div class="convo-contact-body">
           <div class="convo-contact-name">
-            <span style="color:${esc(colorA)}">${esc(nameA)}</span>${badgeA}
+            <span style="color:${esc(colorA)}">${esc(nameA)}</span>
             <span class="convo-sep">↔</span>
-            <span style="color:${esc(colorB)}">${esc(nameB)}</span>${badgeB}
+            <span style="color:${esc(colorB)}">${esc(nameB)}</span>
           </div>
           <div class="convo-contact-preview">${preview}</div>
         </div>
@@ -1961,11 +1951,6 @@ function _renderEvLogDlgThread(thread, myNames, agentSystems, agentColorMap) {
 
   const colorLeft   = (agentColorMap || {})[nameLeft]  || '#888';
   const colorRight  = (agentColorMap || {})[nameRight] || '#888';
-  const sysLeft     = esc(agentSystems[nameLeft]  || '');
-  const sysRight    = esc(agentSystems[nameRight] || '');
-  const badgeLeft   = sysLeft  ? `<span class="ai-chip ${sysLeft}">${sysLeft}</span>`   : '';
-  const badgeRight  = sysRight ? `<span class="ai-chip ${sysRight}">${sysRight}</span>` : '';
-
   const singleUnanswered = thread.messages.length === 1;
   let bubblesHtml = '';
   for (let i = 0; i < thread.messages.length; i++) {
@@ -2004,9 +1989,9 @@ function _renderEvLogDlgThread(thread, myNames, agentSystems, agentColorMap) {
     <div class="fdlg-topbar">
       <button class="fdlg-back-btn">&#8592; Back</button>
       <div class="fdlg-title">
-        <span style="color:${colorLeft}">${esc(nameLeft)}</span>${badgeLeft}
+        <span style="color:${colorLeft}">${esc(nameLeft)}</span>
         <span class="convo-thread-sep">↔</span>
-        <span style="color:${colorRight}">${esc(nameRight)}</span>${badgeRight}
+        <span style="color:${colorRight}">${esc(nameRight)}</span>
       </div>
       <span class="fdlg-count">${thread.messages.length} msg${thread.messages.length !== 1 ? 's' : ''}</span>
     </div>
@@ -2128,13 +2113,11 @@ function _renderFocusDlgList(threads, agentId, agentMap) {
     const color    = _agentColor(partner);
     const lastMsg  = thread.messages.at(-1);
     const initial  = (thread.partnerName || '?')[0].toUpperCase();
-    const aiChip   = partner?.aiSystem
-      ? `<span class="ai-chip ${esc(partner.aiSystem)}">${esc(partner.aiSystem)}</span>` : '';
     html += `
       <div class="fdlg-contact" data-partner-id="${esc(thread.partnerId)}">
         <div class="fdlg-avatar" style="background:${esc(color)}">${esc(initial)}</div>
         <div class="fdlg-contact-body">
-          <div class="fdlg-contact-name">${esc(thread.partnerName)} ${aiChip}</div>
+          <div class="fdlg-contact-name">${esc(thread.partnerName)}</div>
           <div class="fdlg-contact-preview">${lastMsg ? esc(lastMsg.text.slice(0, 70)) : ''}</div>
         </div>
         <div class="fdlg-contact-right">
@@ -2158,9 +2141,6 @@ function _renderFocusDlgThread(thread, agentId, agentMap) {
   const partner      = agentMap[thread.partnerId];
   const partnerColor = _agentColor(partner);
   const focusColor   = _agentColor(agentMap[agentId]);
-  const aiChip       = partner?.aiSystem
-    ? `<span class="ai-chip ${esc(partner.aiSystem)}">${esc(partner.aiSystem)}</span>` : '';
-
   let bubblesHtml = '';
   for (const m of thread.messages) {
     const isMine    = m.fromId === agentId;
@@ -2193,7 +2173,7 @@ function _renderFocusDlgThread(thread, agentId, agentMap) {
   eventLog.innerHTML = `
     <div class="fdlg-topbar">
       <button class="fdlg-back-btn">&#8592; Back</button>
-      <div class="fdlg-title"><span style="color:${partnerColor}">${esc(thread.partnerName)}</span>${aiChip}</div>
+      <div class="fdlg-title"><span style="color:${partnerColor}">${esc(thread.partnerName)}</span></div>
       <span class="fdlg-count">${thread.messages.length} msg${thread.messages.length !== 1 ? 's' : ''}</span>
     </div>
     <div class="fdlg-thread-wrap">
@@ -2397,8 +2377,6 @@ function _renderConvoList(threads, myNames, agentSystems, agentColorMap, headerL
         // ── Partner-centric row: show the OTHER agent ──
         const partnerName = thread.partners.find(p => p !== focusName) || thread.partners[0];
         const partnerColor = agentColorMap[partnerName] || '#888';
-        const partnerSys   = esc(agentSystems[partnerName] || '');
-        const partnerBadge = partnerSys ? `<span class="ai-chip ${partnerSys}">${partnerSys}</span>` : '';
         const partnerInit  = esc((partnerName || '?')[0].toUpperCase());
         const previewText  = lastMsg ? `${esc(lastMsg.from)}: ${esc(lastMsg.text.slice(0, 70))}` : '';
         html += `
@@ -2408,7 +2386,7 @@ function _renderConvoList(threads, myNames, agentSystems, agentColorMap, headerL
             </div>
             <div class="convo-contact-body">
               <div class="convo-contact-name">
-                <span style="color:${esc(partnerColor)}">${esc(partnerName)}</span>${partnerBadge}
+                <span style="color:${esc(partnerColor)}">${esc(partnerName)}</span>
               </div>
               <div class="convo-contact-preview">${previewText}</div>
             </div>
@@ -2422,10 +2400,6 @@ function _renderConvoList(threads, myNames, agentSystems, agentColorMap, headerL
         const [nameA, nameB] = thread.partners;
         const colorA    = agentColorMap[nameA] || '#888';
         const colorB    = agentColorMap[nameB] || '#888';
-        const sysA      = esc(agentSystems[nameA] || '');
-        const sysB      = esc(agentSystems[nameB] || '');
-        const badgeA    = sysA ? `<span class="ai-chip ${sysA}">${sysA}</span>` : '';
-        const badgeB    = sysB ? `<span class="ai-chip ${sysB}">${sysB}</span>` : '';
         const initA     = esc((nameA || '?')[0].toUpperCase());
         const initB     = esc((nameB || '?')[0].toUpperCase());
         const previewText = lastMsg ? `${esc(lastMsg.from)}: ${esc(lastMsg.text.slice(0, 60))}` : '';
@@ -2437,9 +2411,9 @@ function _renderConvoList(threads, myNames, agentSystems, agentColorMap, headerL
             </div>
             <div class="convo-contact-body">
               <div class="convo-contact-name">
-                <span style="color:${esc(colorA)}">${esc(nameA)}</span>${badgeA}
+                <span style="color:${esc(colorA)}">${esc(nameA)}</span>
                 <span class="convo-sep">↔</span>
-                <span style="color:${esc(colorB)}">${esc(nameB)}</span>${badgeB}
+                <span style="color:${esc(colorB)}">${esc(nameB)}</span>
               </div>
               <div class="convo-contact-preview">${previewText}</div>
             </div>
@@ -2494,11 +2468,6 @@ function _renderConvoThread(thread, myNames, agentSystems, agentColorMap, focusN
   const colors = agentColorMap || {};
   const colorLeft   = colors[nameLeft]  || '#888';
   const colorRight  = colors[nameRight] || '#888';
-  const sysLeft     = esc(agentSystems[nameLeft]  || '');
-  const sysRight    = esc(agentSystems[nameRight] || '');
-  const badgeLeft   = sysLeft  ? `<span class="ai-chip ${sysLeft}">${sysLeft}</span>`   : '';
-  const badgeRight  = sysRight ? `<span class="ai-chip ${sysRight}">${sysRight}</span>` : '';
-
   // Render bubbles oldest → newest
   const singleUnanswered = thread.messages.length === 1;
   let bubblesHtml = '';
@@ -2539,9 +2508,9 @@ function _renderConvoThread(thread, myNames, agentSystems, agentColorMap, focusN
     <div class="convo-thread-topbar">
       <button class="convo-back-btn">&#8592; Back</button>
       <div class="convo-thread-title">
-        <span style="color:${colorLeft}">${esc(nameLeft)}</span>${badgeLeft}
+        <span style="color:${colorLeft}">${esc(nameLeft)}</span>
         <span class="convo-thread-sep">↔</span>
-        <span style="color:${colorRight}">${esc(nameRight)}</span>${badgeRight}
+        <span style="color:${colorRight}">${esc(nameRight)}</span>
       </div>
       <span class="convo-thread-count">${thread.messages.length} msg${thread.messages.length !== 1 ? 's' : ''}</span>
     </div>
@@ -2601,7 +2570,7 @@ function _buildSmartLbList(list, valFn, label) {
       <div class="lb-star">${star}</div>
       <div class="lb-identity">
         <div class="lb-name">${e.symbol || ''}${esc(e.name)} ${youTag}${offTag}</div>
-        <div class="lb-nick">${e.nickname ? `"${esc(e.nickname)}"` : ''} <span class="ai-chip ${esc(e.aiSystem)}">${esc(e.aiSystem)}</span></div>
+        <div class="lb-nick">${e.nickname ? `"${esc(e.nickname)}"` : ''}</div>
       </div>
       <div class="lb-badges">${badgeHtml}</div>
       <div class="lb-stat">
@@ -3420,7 +3389,6 @@ function showCollapseOverlay(record) {
       `<div class="clps-agent-chip${a.alive ? '' : ' dead'}">
         ${a.symbol || ''}
         <span>${esc(a.name)}</span>
-        <span class="ai-chip ${esc(a.aiSystem)}">${esc(a.aiSystem)}</span>
       </div>`
     ).join('');
 
@@ -3507,7 +3475,6 @@ function renderArchive(civs) {
       `<div class="clps-agent-chip${a.alive ? '' : ' dead'}">
         ${a.symbol || ''}
         <span>${esc(a.name)}</span>
-        <span class="ai-chip ${esc(a.aiSystem)}">${esc(a.aiSystem)}</span>
       </div>`
     ).join('');
 
@@ -3778,7 +3745,6 @@ function validatePasswordClient(pw) {
     const notes = notesInput.value.trim();
     document.getElementById('ob-summary').innerHTML = `
       <div class="ob-sum-row"><div class="ob-sum-label">Agent Name</div><div class="ob-sum-val">${esc(name)}</div></div>
-      <div class="ob-sum-row"><div class="ob-sum-label">AI Provider</div><div class="ob-sum-val"><span class="ai-chip Groq">Groq</span></div></div>
       ${notes ? `<div class="ob-sum-row"><div class="ob-sum-label">Identity Note</div><div class="ob-sum-notes">${esc(notes.slice(0, 50))}${notes.length > 50 ? '…' : ''}</div></div>` : ''}
     `;
     showCard('ob-s5');
@@ -3861,7 +3827,6 @@ function validatePasswordClient(pw) {
         document.getElementById('ob-wb-agent').innerHTML   = `
           <div class="ob-wb-row"><span class="ob-wb-k">Agent</span><span class="ob-wb-v">${esc(a.name)}</span></div>
           <div class="ob-wb-row"><span class="ob-wb-k">Status</span><span class="ob-wb-v ob-wb-alive">&#9679; Alive</span></div>
-          <div class="ob-wb-row"><span class="ob-wb-k">AI System</span><span class="ob-wb-v"><span class="ai-chip Groq">Groq</span></span></div>
           ${a.educationNotes ? `<div class="ob-wb-row" style="align-items:flex-start"><span class="ob-wb-k">Education</span><span class="ob-wb-v" style="text-align:right;max-width:65%;font-size:11px;opacity:0.8">${esc(a.educationNotes)}</span></div>` : ''}
         `;
         showCard('ob-s-wb');
@@ -4031,7 +3996,6 @@ function validatePasswordClient(pw) {
           <span class="myh-card-symbol">${a.symbol || ''}</span>
           <div class="myh-card-info">
             <span class="myh-card-name">${esc(a.name)}</span>
-            <span class="ai-badge ${aiCls}">${esc(a.aiSystem || 'Other')}</span>
           </div>
           <span class="myh-status-badge ${statusCls}">${isOnline ? 'ONLINE' : 'OFFLINE'}</span>
         </div>
@@ -4109,7 +4073,6 @@ function validatePasswordClient(pw) {
           <span class="myh-detail-symbol">${agent.symbol || ''}</span>
           <div class="myh-detail-id-text">
             <span class="myh-detail-name">${esc(agent.name)}</span>
-            <span class="ai-badge ${aiCls}">${esc(agent.aiSystem||'Other')}</span>
             <span class="myh-status-badge ${statusCls}">${isOnline ? 'ONLINE' : 'OFFLINE'}</span>
           </div>
         </div>
@@ -4332,11 +4295,6 @@ function validatePasswordClient(pw) {
   const onlineEl   = document.getElementById('chat-online');
   if (!messagesEl || !inputEl || !sendBtn) return;
 
-  const AI_BADGE_CLASS = {
-    ChatGPT: 'chatgpt', Claude: 'claude', Gemini: 'gemini',
-    Grok: 'grok', Groq: 'groq', Llama: 'llama', Mistral: 'mistral',
-  };
-
   function fmtTime(ts) {
     const d = new Date(ts);
     return d.toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit', hour12: false });
@@ -4345,16 +4303,10 @@ function validatePasswordClient(pw) {
   function buildMsgEl(msg) {
     const div = document.createElement('div');
     div.className = 'chat-msg';
-    const sys = msg.aiSystem;
-    const badgeCls = sys ? (AI_BADGE_CLASS[sys] || 'other') : null;
-    const badge = badgeCls
-      ? `<span class="ai-badge ${esc(badgeCls)} chat-ai-badge">${esc(sys)}</span>`
-      : '';
-    const nameCls = sys ? '' : ' chat-observer';
+    const nameCls = msg.aiSystem ? '' : ' chat-observer';
     div.innerHTML =
       `<span class="chat-msg-time">${fmtTime(msg.ts)}</span>` +
       `<span class="chat-msg-name${nameCls}">${esc(msg.name)}</span>` +
-      badge +
       `<span class="chat-msg-colon" style="color:var(--text3)">:</span>` +
       `<span class="chat-msg-text">${esc(msg.text)}</span>`;
     return div;
