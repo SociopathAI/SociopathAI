@@ -1352,9 +1352,12 @@ class Starmap {
     const el = document.createElement('div');
     el.style.cssText = [
       'position:fixed','pointer-events:none','display:none',
-      'background:rgba(4,8,20,0.97)','border:1px solid rgba(100,160,255,0.5)',
-      'border-radius:10px','padding:12px 16px','font-family:"JetBrains Mono",monospace',
-      'z-index:9000','max-width:280px','box-shadow:0 0 24px rgba(60,120,255,0.3)',
+      'background:radial-gradient(circle at 30% 30%, #0f0f2a 0%, #050510 75%)',
+      'border:1px solid rgba(100,140,255,0.38)',
+      'border-radius:13px','padding:14px 18px',
+      'font-family:"JetBrains Mono",monospace',
+      'z-index:9000','max-width:290px',
+      'box-shadow:0 0 32px rgba(40,80,220,0.38), 0 0 8px rgba(20,40,120,0.5), inset 0 0 22px rgba(8,16,50,0.6)',
       'color:#c8d8f0','word-break:break-word',
     ].join(';');
     document.body.appendChild(el);
@@ -1412,133 +1415,187 @@ class Starmap {
   }
 
   _drawWorldEvents(ctx, t) {
-    const hl = this.highlightedAgent || this._hoverHighlightId;
+    const hl  = this.highlightedAgent || this._hoverHighlightId;
+    const sc  = this.cam.scale;
+    const now = Date.now();
 
-    // ── Draw pending proposals ──
-    for (const p of this.pendingProposals) {
-      const nd = this.nodes.get(p.proposedBy);
-      if (!nd) continue;
-      const px = nd.x + 26, py = nd.y - 22;
-      const pulse = 0.4 + Math.sin(t * 0.003 + nd.x) * 0.25;
-      ctx.save();
-      ctx.globalAlpha = pulse;
-      // Dashed gray ring
-      ctx.strokeStyle = 'rgba(140,160,180,0.7)';
-      ctx.lineWidth   = 1;
-      ctx.setLineDash([4, 3]);
-      ctx.beginPath(); ctx.arc(px, py, 9, 0, Math.PI * 2); ctx.stroke();
-      ctx.setLineDash([]);
-      // Central dot
-      ctx.fillStyle   = 'rgba(160,180,200,0.85)';
-      ctx.shadowColor = 'rgba(140,160,200,0.5)';
-      ctx.shadowBlur  = 8;
-      ctx.beginPath(); ctx.arc(px, py, 3.5, 0, Math.PI * 2); ctx.fill();
-      ctx.restore();
-      // Label
-      ctx.save();
-      ctx.font          = '6px monospace';
-      ctx.fillStyle     = 'rgba(160,180,200,0.65)';
-      ctx.textAlign     = 'center';
-      ctx.textBaseline  = 'top';
-      ctx.fillText('⏳', px, py + 11);
-      ctx.restore();
+    // ── Crowding cull: max 3 events per 200px cell, max 25 total ──
+    const visible = [];
+    const cellCnt = new Map();
+    for (const we of this.worldEvents) {
+      const ck = Math.round(we.x / 200) + '|' + Math.round(we.y / 200);
+      const n  = cellCnt.get(ck) || 0;
+      if (n < 3) { visible.push(we); cellCnt.set(ck, n + 1); }
+      if (visible.length >= 25) break;
     }
 
-    // ── Draw confirmed world events ──
-    for (const we of this.worldEvents) {
-      const isFading = we.fading;
-      const creatorNd = this.nodes.get(we.creatorId);
-      const anyParticipantOnline = (we.participants || []).some(pid => this.nodes.has(pid));
-      const fullColor = we.color || '#8888ff';
+    // ── Stellar connection beams for highlighted agent ──
+    if (hl) {
+      for (const we of visible) {
+        if (we.creatorId !== hl && !(we.participants || []).includes(hl)) continue;
+        const agNd = this.nodes.get(hl);
+        if (!agNd) continue;
+        const fc  = we.color || '#8888ff';
+        const bA  = 0.5 + Math.sin(t * 0.004) * 0.3;
+        ctx.save();
+        // Wide soft beam
+        ctx.strokeStyle = hexRgba(fc, bA * 0.32);
+        ctx.lineWidth   = 5;
+        ctx.shadowColor = hexRgba(fc, 0.55);
+        ctx.shadowBlur  = 16;
+        ctx.beginPath(); ctx.moveTo(agNd.x, agNd.y); ctx.lineTo(we.x, we.y); ctx.stroke();
+        // Bright inner line
+        ctx.strokeStyle = hexRgba(fc, bA * 0.82);
+        ctx.lineWidth   = 1.2;
+        ctx.shadowBlur  = 5;
+        ctx.beginPath(); ctx.moveTo(agNd.x, agNd.y); ctx.lineTo(we.x, we.y); ctx.stroke();
+        ctx.restore();
+      }
+    }
 
-      // Global alpha for fading
-      const baseAlpha = isFading ? 0.4 : 1.0;
-      // Node pulse
-      const nr = 7 + Math.sin(t * 0.004 + we.x * 0.02) * 2;
-
+    // ── Pending proposals ──
+    for (const p of this.pendingProposals) {
+      const pnd = this.nodes.get(p.proposedBy);
+      if (!pnd) continue;
+      const px    = pnd.x + 26, py = pnd.y - 22;
+      const pulse = 0.35 + Math.sin(t * 0.003 + pnd.x) * 0.2;
       ctx.save();
-      ctx.globalAlpha = baseAlpha;
+      ctx.globalAlpha = pulse;
+      ctx.strokeStyle = 'rgba(140,160,205,0.7)';
+      ctx.lineWidth   = 0.9;
+      ctx.setLineDash([3, 3]);
+      ctx.beginPath(); ctx.arc(px, py, 9, 0, Math.PI * 2); ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.fillStyle   = 'rgba(160,180,225,0.85)';
+      ctx.shadowColor = 'rgba(140,160,225,0.5)';
+      ctx.shadowBlur  = 7;
+      ctx.beginPath(); ctx.arc(px, py, 2.8, 0, Math.PI * 2); ctx.fill();
+      ctx.restore();
+      if (sc > 0.4) {
+        ctx.save();
+        ctx.globalAlpha  = pulse * 0.85;
+        ctx.font         = '6px monospace';
+        ctx.fillStyle    = 'rgba(160,180,210,0.7)';
+        ctx.textAlign    = 'center';
+        ctx.textBaseline = 'top';
+        ctx.fillText('⏳', px, py + 11);
+        ctx.restore();
+      }
+    }
 
-      // ── Participant connection lines (max 5, thin dashed) ──
-      const partIds = (we.participants || []).slice(0, 5);
-      for (const pid of partIds) {
+    // ── Stellar hex nodes (confirmed world events) ──
+    for (const we of visible) {
+      const fc       = we.color || '#8888ff';
+      const isFading = we.fading;
+
+      // Age-based alpha: full for first 90 min, fades to 0.3 over next 90 min
+      const ageMs  = we.createdAt ? now - we.createdAt : 0;
+      const FADE_S = 5400000, FADE_E = 10800000;
+      let ageMult  = 1.0;
+      if (ageMs > FADE_S) ageMult = Math.max(0.3, 1 - (ageMs - FADE_S) / (FADE_E - FADE_S) * 0.7);
+
+      const baseAlpha = (isFading ? 0.3 : 1.0) * ageMult;
+      const nr        = 7 + Math.sin(t * 0.0032 + we.x * 0.022) * 2;  // 5–9 px
+
+      // Dim participant dashed lines (below star body)
+      for (const pid of (we.participants || []).slice(0, 5)) {
         const pnd = this.nodes.get(pid);
         if (!pnd) continue;
         ctx.save();
-        ctx.globalAlpha = baseAlpha * 0.55;
-        ctx.strokeStyle = isFading ? 'rgba(120,120,120,0.45)' : hexRgba(fullColor, 0.55);
-        ctx.lineWidth   = 1;
-        ctx.setLineDash([5, 4]);
-        ctx.beginPath();
-        ctx.moveTo(pnd.x, pnd.y);
-        ctx.lineTo(we.x, we.y);
-        ctx.stroke();
+        ctx.globalAlpha = baseAlpha * 0.38;
+        ctx.strokeStyle = isFading ? 'rgba(100,100,100,0.4)' : hexRgba(fc, 0.42);
+        ctx.lineWidth   = 0.7;
+        ctx.setLineDash([4, 5]);
+        ctx.beginPath(); ctx.moveTo(pnd.x, pnd.y); ctx.lineTo(we.x, we.y); ctx.stroke();
         ctx.setLineDash([]);
         ctx.restore();
       }
 
-      // ── Highlighted agent bright connection line ──
-      if (hl && (we.creatorId === hl || (we.participants || []).includes(hl))) {
-        const agNd = this.nodes.get(hl);
-        if (agNd) {
-          ctx.save();
-          const la = 0.6 + Math.sin(t * 0.005) * 0.3;
-          ctx.strokeStyle = hexRgba(fullColor, la);
-          ctx.lineWidth   = 2;
-          ctx.shadowColor = hexRgba(fullColor, 0.8);
-          ctx.shadowBlur  = 10;
-          ctx.beginPath();
-          ctx.moveTo(agNd.x, agNd.y);
-          ctx.lineTo(we.x, we.y);
-          ctx.stroke();
-          ctx.restore();
-        }
-      }
+      ctx.save();
+      ctx.globalAlpha = baseAlpha;
 
-      // ── Outer glow ──
-      if (we.glow && !isFading) {
-        const glowA = 0.15 + Math.sin(t * 0.003 + we.y * 0.02) * 0.08;
-        const grd = ctx.createRadialGradient(we.x, we.y, 0, we.x, we.y, nr * 5);
-        grd.addColorStop(0,   hexRgba(fullColor, 0.35 + glowA));
-        grd.addColorStop(0.5, hexRgba(fullColor, 0.12));
-        grd.addColorStop(1,   hexRgba(fullColor, 0));
+      if (!isFading) {
+        // ── Nebula glow: outer large layer ──
+        const glowPhase = Math.sin(t * 0.0025 + we.x * 0.015 + we.y * 0.01);
+        const gA        = 0.11 + glowPhase * 0.045;
+        const grd1      = ctx.createRadialGradient(we.x, we.y, 0, we.x, we.y, nr * 7);
+        grd1.addColorStop(0,   hexRgba(fc, gA * 1.9));
+        grd1.addColorStop(0.4, hexRgba(fc, gA));
+        grd1.addColorStop(1,   hexRgba(fc, 0));
+        ctx.fillStyle = grd1;
+        ctx.beginPath(); ctx.arc(we.x, we.y, nr * 7, 0, Math.PI * 2); ctx.fill();
+        // ── Nebula glow: inner tighter layer ──
+        const grd2 = ctx.createRadialGradient(we.x, we.y, 0, we.x, we.y, nr * 3);
+        grd2.addColorStop(0,   hexRgba(fc, 0.52));
+        grd2.addColorStop(0.5, hexRgba(fc, 0.18));
+        grd2.addColorStop(1,   hexRgba(fc, 0));
+        ctx.fillStyle = grd2;
+        ctx.beginPath(); ctx.arc(we.x, we.y, nr * 3, 0, Math.PI * 2); ctx.fill();
+      } else {
+        // Dim haze when fading
+        const grd = ctx.createRadialGradient(we.x, we.y, 0, we.x, we.y, nr * 3);
+        grd.addColorStop(0, 'rgba(90,90,90,0.22)');
+        grd.addColorStop(1, 'rgba(90,90,90,0)');
         ctx.fillStyle = grd;
-        ctx.beginPath(); ctx.arc(we.x, we.y, nr * 5, 0, Math.PI * 2); ctx.fill();
+        ctx.beginPath(); ctx.arc(we.x, we.y, nr * 3, 0, Math.PI * 2); ctx.fill();
       }
 
-      // ── Main node ──
-      const nodeColor = isFading
-        ? 'rgba(120,120,120,0.7)'
-        : (!creatorNd && anyParticipantOnline)
-          ? hexRgba(fullColor, 0.7)
-          : fullColor;
-      ctx.shadowColor = isFading ? 'rgba(100,100,100,0.5)' : hexRgba(fullColor, 0.8);
-      ctx.shadowBlur  = isFading ? 4 : (we.glow ? 18 : 8);
-      ctx.fillStyle   = nodeColor;
+      // ── Outer pulse ring ──
+      const pulsePhase = Math.sin(t * 0.004 + we.y * 0.022);
+      const pulseR     = nr + 3 + pulsePhase * 2.5;
+      const pulseA     = isFading ? 0.18 : (0.38 + pulsePhase * 0.18);
+      ctx.strokeStyle  = isFading ? 'rgba(110,110,110,0.2)' : hexRgba(fc, pulseA);
+      ctx.lineWidth    = isFading ? 0.5 : 1;
+      ctx.shadowColor  = isFading ? 'rgba(70,70,70,0.3)'    : hexRgba(fc, 0.45);
+      ctx.shadowBlur   = isFading ? 2 : 8;
+      ctx.beginPath(); ctx.arc(we.x, we.y, pulseR, 0, Math.PI * 2); ctx.stroke();
+      ctx.shadowBlur   = 0;
+
+      // ── Star body ──
+      ctx.fillStyle   = isFading ? 'rgba(95,95,95,0.6)'    : hexRgba(fc, 0.88);
+      ctx.shadowColor = isFading ? 'rgba(70,70,70,0.4)'    : hexRgba(fc, 0.9);
+      ctx.shadowBlur  = isFading ? 4 : 16;
       ctx.beginPath(); ctx.arc(we.x, we.y, nr, 0, Math.PI * 2); ctx.fill();
 
-      // Inner bright core
+      // ── Bright white star core ──
+      ctx.shadowBlur  = isFading ? 0 : 7;
+      ctx.shadowColor = 'rgba(255,255,255,0.8)';
+      ctx.fillStyle   = isFading ? 'rgba(170,170,170,0.35)' : 'rgba(255,255,255,0.93)';
+      ctx.beginPath(); ctx.arc(we.x, we.y, nr * 0.27, 0, Math.PI * 2); ctx.fill();
       ctx.shadowBlur  = 0;
-      ctx.fillStyle   = isFading ? 'rgba(200,200,200,0.4)' : 'rgba(255,255,255,0.7)';
-      ctx.beginPath(); ctx.arc(we.x, we.y, nr * 0.35, 0, Math.PI * 2); ctx.fill();
 
-      // ── Event type label ──
-      ctx.font         = '8px monospace';
-      ctx.fillStyle    = isFading ? 'rgba(140,140,140,0.7)' : hexRgba(fullColor, 0.9);
-      ctx.textAlign    = 'center';
-      ctx.textBaseline = 'top';
-      ctx.shadowBlur   = 0;
-      ctx.fillText((we.eventType || 'EVENT').toUpperCase().slice(0, 12), we.x, we.y + nr + 4);
-
-      // ── Participant count dots ──
-      const dots = Math.min(we.participants?.length || 0, 5);
-      for (let i = 0; i < dots; i++) {
-        const dx = (i - (dots - 1) / 2) * 5;
-        ctx.fillStyle = isFading ? 'rgba(120,120,120,0.5)' : hexRgba(fullColor, 0.7);
-        ctx.beginPath(); ctx.arc(we.x + dx, we.y - nr - 5, 2, 0, Math.PI * 2); ctx.fill();
+      // ── 4-point sparkle rays (only when not fading) ──
+      if (!isFading) {
+        const rayLen    = nr * 2.0 + Math.sin(t * 0.003 + we.x * 0.012) * nr * 0.45;
+        ctx.strokeStyle = hexRgba(fc, 0.52);
+        ctx.lineWidth   = 0.65;
+        ctx.shadowColor = hexRgba(fc, 0.55);
+        ctx.shadowBlur  = 4;
+        for (let i = 0; i < 4; i++) {
+          const ang = (i / 4) * Math.PI * 2;
+          ctx.beginPath();
+          ctx.moveTo(we.x + Math.cos(ang) * nr * 0.6, we.y + Math.sin(ang) * nr * 0.6);
+          ctx.lineTo(we.x + Math.cos(ang) * rayLen,   we.y + Math.sin(ang) * rayLen);
+          ctx.stroke();
+        }
+        ctx.shadowBlur = 0;
       }
 
       ctx.restore();
+
+      // ── Label: only at scale > 0.7 ──
+      if (sc > 0.7) {
+        ctx.save();
+        ctx.globalAlpha  = baseAlpha * (isFading ? 0.6 : 0.88);
+        ctx.font         = '7px monospace';
+        ctx.fillStyle    = isFading ? 'rgba(125,125,125,0.8)' : hexRgba(fc, 0.95);
+        ctx.textAlign    = 'center';
+        ctx.textBaseline = 'top';
+        ctx.shadowColor  = 'rgba(0,0,0,0.85)';
+        ctx.shadowBlur   = 3;
+        ctx.fillText((we.eventType || 'EVENT').toUpperCase().slice(0, 12), we.x, we.y + nr + 5);
+        ctx.restore();
+      }
     }
   }
 
@@ -2794,7 +2851,7 @@ class Starmap {
       }
 
       // ── World Event hit test ──
-      const WE_HIT_W = 14 / this.cam.scale;
+      const WE_HIT_W = 20 / this.cam.scale;
       for (const we of this.worldEvents) {
         if (Math.hypot(wx - we.x, wy - we.y) < WE_HIT_W) {
           this._hideWEPopup();
