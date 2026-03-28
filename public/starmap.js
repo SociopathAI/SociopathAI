@@ -161,6 +161,8 @@ class Starmap {
     this.pendingProposals = [];
     this._selectedWorldEvent  = null;   // currently clicked event (for popup)
     this._wePopupEl           = this._createWEPopup();
+    this._bgHexVerts  = null;           // lazily computed from background grid math
+    this._eventHexPos = new Map();      // event.id → {x, y} in world space
 
     // Dormant fade-out: nodes that are fading away because owner went offline
     // agentId → { x, y, t, agent }
@@ -422,6 +424,9 @@ class Starmap {
     // World Events + pending proposals
     this.worldEvents      = Array.isArray(state.worldEvents)      ? state.worldEvents      : [];
     this.pendingProposals = Array.isArray(state.pendingProposals) ? state.pendingProposals : [];
+    // Clean up cached hex positions for events that no longer exist
+    { const _live = new Set(this.worldEvents.map(e => e.id));
+      for (const id of this._eventHexPos.keys()) { if (!_live.has(id)) this._eventHexPos.delete(id); } }
 
     // Connections — guard against missing/null
     this.connections = Array.isArray(state.connections) ? state.connections : [];
@@ -1414,186 +1419,230 @@ class Starmap {
     this._selectedWorldEvent = null;
   }
 
+  /** Pre-compute every vertex of the background hex grid (same math as _drawQuantumBackground). */
+  _getBgHexVerts() {
+    if (this._bgHexVerts) return this._bgHexVerts;
+    const HEX   = 52;
+    const colW  = HEX * Math.sqrt(3);
+    const rowH  = HEX * 1.5;
+    const areaW = WORLD_W * 2 + 240;
+    const areaH = WORLD_H * 2 + 240;
+    const offX  = -areaW / 2;
+    const offY  = -areaH / 2;
+    const cols  = Math.ceil(areaW / colW) + 2;
+    const rows  = Math.ceil(areaH / rowH) + 2;
+    const verts = [];
+    const seen  = new Set();
+    for (let row = -1; row < rows; row++) {
+      for (let col = -1; col < cols; col++) {
+        const cx = offX + col * colW + (row % 2 === 0 ? 0 : colW / 2);
+        const cy = offY + row * rowH;
+        for (let v = 0; v < 6; v++) {
+          const ang = (v / 6) * Math.PI * 2 - Math.PI / 6;
+          const hx  = cx + Math.cos(ang) * HEX;
+          const hy  = cy + Math.sin(ang) * HEX;
+          const key = Math.round(hx) + ',' + Math.round(hy);
+          if (!seen.has(key)) { seen.add(key); verts.push({ x: hx, y: hy }); }
+        }
+      }
+    }
+    this._bgHexVerts = verts;
+    return verts;
+  }
+
+  /**
+   * Find and cache the best background hex vertex for a world event.
+   * Rules: ≥150 world-px from any agent, ≥80 world-px from other events.
+   * Falls back to relaxed constraints if needed.
+   */
+  _assignHexVert(we) {
+    if (this._eventHexPos.has(we.id)) return;
+    const verts     = this._getBgHexVerts();
+    const creatorNd = this.nodes.get(we.creatorId);
+    const originX   = creatorNd ? creatorNd.x : (we.x || 0);
+    const originY   = creatorNd ? creatorNd.y : (we.y || 0);
+    const takenPts  = [];
+    for (const [, pos] of this._eventHexPos) takenPts.push(pos);
+
+    const agentPts = [...this.nodes.values()].map(n => ({ x: n.x, y: n.y }));
+
+    const tryFind = (agentClear, minEventDist) => {
+      let best = null, bestDist = Infinity;
+      for (const v of verts) {
+        if (Math.abs(v.x) > WORLD_W + 20 || Math.abs(v.y) > WORLD_H + 20) continue;
+        if (agentClear) {
+          let ok = true;
+          for (const a of agentPts) { if (Math.hypot(v.x - a.x, v.y - a.y) < 150) { ok = false; break; } }
+          if (!ok) continue;
+        }
+        let evOk = true;
+        for (const p of takenPts) { if (Math.hypot(v.x - p.x, v.y - p.y) < minEventDist) { evOk = false; break; } }
+        if (!evOk) continue;
+        const d = Math.hypot(v.x - originX, v.y - originY);
+        if (d < bestDist) { bestDist = d; best = v; }
+      }
+      return best;
+    };
+
+    const pos = tryFind(true, 80) || tryFind(false, 80) || tryFind(false, 40) || { x: we.x || 0, y: we.y || 0 };
+    this._eventHexPos.set(we.id, { x: pos.x, y: pos.y });
+  }
+
   _drawWorldEvents(ctx, t) {
-    const hl  = this.highlightedAgent || this._hoverHighlightId;
     const sc  = this.cam.scale;
     const now = Date.now();
+    // Use only click-selected agent for opacity rules (not hover)
+    const sel = this.highlightedAgent;
 
-    // ── Crowding cull: max 3 events per 200px cell, max 25 total ──
+    // Assign hex vertices + crowding cull (max 3 per 200px cell, max 25 total)
     const visible = [];
     const cellCnt = new Map();
     for (const we of this.worldEvents) {
-      const ck = Math.round(we.x / 200) + '|' + Math.round(we.y / 200);
+      this._assignHexVert(we);
+      const pos = this._eventHexPos.get(we.id);
+      if (!pos) continue;
+      const ck = Math.round(pos.x / 200) + '|' + Math.round(pos.y / 200);
       const n  = cellCnt.get(ck) || 0;
-      if (n < 3) { visible.push(we); cellCnt.set(ck, n + 1); }
+      if (n < 3) { visible.push({ we, pos }); cellCnt.set(ck, n + 1); }
       if (visible.length >= 25) break;
     }
 
-    // ── Stellar connection beams for highlighted agent ──
-    if (hl) {
-      for (const we of visible) {
-        if (we.creatorId !== hl && !(we.participants || []).includes(hl)) continue;
-        const agNd = this.nodes.get(hl);
-        if (!agNd) continue;
-        const fc  = we.color || '#8888ff';
-        const bA  = 0.5 + Math.sin(t * 0.004) * 0.3;
-        ctx.save();
-        // Wide soft beam
-        ctx.strokeStyle = hexRgba(fc, bA * 0.32);
-        ctx.lineWidth   = 5;
-        ctx.shadowColor = hexRgba(fc, 0.55);
-        ctx.shadowBlur  = 16;
-        ctx.beginPath(); ctx.moveTo(agNd.x, agNd.y); ctx.lineTo(we.x, we.y); ctx.stroke();
-        // Bright inner line
-        ctx.strokeStyle = hexRgba(fc, bA * 0.82);
-        ctx.lineWidth   = 1.2;
-        ctx.shadowBlur  = 5;
-        ctx.beginPath(); ctx.moveTo(agNd.x, agNd.y); ctx.lineTo(we.x, we.y); ctx.stroke();
-        ctx.restore();
+    // Build set of event IDs connected to selected agent
+    const connectedIds = new Set();
+    if (sel) {
+      for (const { we } of visible) {
+        if (we.creatorId === sel || (we.participants || []).includes(sel)) {
+          connectedIds.add(we.id);
+        }
       }
     }
 
-    // ── Pending proposals ──
+    // ── Pending proposals: tiny dim indicator at background hex vertex ──
     for (const p of this.pendingProposals) {
+      // Pick a stable position near the proposer's vicinity using their node coords
       const pnd = this.nodes.get(p.proposedBy);
       if (!pnd) continue;
-      const px    = pnd.x + 26, py = pnd.y - 22;
-      const pulse = 0.35 + Math.sin(t * 0.003 + pnd.x) * 0.2;
+      // Find nearest hex vertex to proposer
+      const verts = this._getBgHexVerts();
+      let bestV = null, bestD = Infinity;
+      for (const v of verts) {
+        const d = Math.hypot(v.x - pnd.x, v.y - pnd.y);
+        if (d < bestD && d > 30) { bestD = d; bestV = v; }
+      }
+      if (!bestV) continue;
+      const pulse = 0.15 + Math.sin(t * 0.003 + pnd.x) * 0.08;
       ctx.save();
       ctx.globalAlpha = pulse;
-      ctx.strokeStyle = 'rgba(140,160,205,0.7)';
-      ctx.lineWidth   = 0.9;
-      ctx.setLineDash([3, 3]);
-      ctx.beginPath(); ctx.arc(px, py, 9, 0, Math.PI * 2); ctx.stroke();
+      ctx.strokeStyle = 'rgba(140,160,205,0.6)';
+      ctx.lineWidth   = 0.8;
+      ctx.setLineDash([2, 3]);
+      ctx.beginPath(); ctx.arc(bestV.x, bestV.y, 7, 0, Math.PI * 2); ctx.stroke();
       ctx.setLineDash([]);
-      ctx.fillStyle   = 'rgba(160,180,225,0.85)';
-      ctx.shadowColor = 'rgba(140,160,225,0.5)';
-      ctx.shadowBlur  = 7;
-      ctx.beginPath(); ctx.arc(px, py, 2.8, 0, Math.PI * 2); ctx.fill();
+      ctx.fillStyle   = 'rgba(160,180,225,0.7)';
+      ctx.beginPath(); ctx.arc(bestV.x, bestV.y, 2, 0, Math.PI * 2); ctx.fill();
       ctx.restore();
-      if (sc > 0.4) {
-        ctx.save();
-        ctx.globalAlpha  = pulse * 0.85;
-        ctx.font         = '6px monospace';
-        ctx.fillStyle    = 'rgba(160,180,210,0.7)';
-        ctx.textAlign    = 'center';
-        ctx.textBaseline = 'top';
-        ctx.fillText('⏳', px, py + 11);
-        ctx.restore();
-      }
     }
 
-    // ── Stellar hex nodes (confirmed world events) ──
-    for (const we of visible) {
-      const fc       = we.color || '#8888ff';
+    // ── Stellar hex nodes ──
+    for (const { we, pos } of visible) {
+      const wx = pos.x, wy = pos.y;
+      const fc = we.color || '#8888ff';
       const isFading = we.fading;
 
-      // Age-based alpha: full for first 90 min, fades to 0.3 over next 90 min
+      // Opacity: 20% default, 100% if connected to selected, 10% if dimmed
+      let opacity;
+      if (!sel) {
+        opacity = 0.20;
+      } else if (connectedIds.has(we.id)) {
+        opacity = 1.0;
+      } else {
+        opacity = 0.10;
+      }
+
+      // Age mult: full for 90 min, fades to 0.3 over the next 90 min
       const ageMs  = we.createdAt ? now - we.createdAt : 0;
       const FADE_S = 5400000, FADE_E = 10800000;
       let ageMult  = 1.0;
       if (ageMs > FADE_S) ageMult = Math.max(0.3, 1 - (ageMs - FADE_S) / (FADE_E - FADE_S) * 0.7);
+      if (isFading) ageMult *= 0.35;
 
-      const baseAlpha = (isFading ? 0.3 : 1.0) * ageMult;
-      const nr        = 7 + Math.sin(t * 0.0032 + we.x * 0.022) * 2;  // 5–9 px
-
-      // Dim participant dashed lines (below star body)
-      for (const pid of (we.participants || []).slice(0, 5)) {
-        const pnd = this.nodes.get(pid);
-        if (!pnd) continue;
-        ctx.save();
-        ctx.globalAlpha = baseAlpha * 0.38;
-        ctx.strokeStyle = isFading ? 'rgba(100,100,100,0.4)' : hexRgba(fc, 0.42);
-        ctx.lineWidth   = 0.7;
-        ctx.setLineDash([4, 5]);
-        ctx.beginPath(); ctx.moveTo(pnd.x, pnd.y); ctx.lineTo(we.x, we.y); ctx.stroke();
-        ctx.setLineDash([]);
-        ctx.restore();
-      }
+      const finalAlpha = opacity * ageMult;
+      const isLit      = sel && connectedIds.has(we.id);
+      const nr         = 7 + Math.sin(t * 0.0032 + wx * 0.022) * 2;
 
       ctx.save();
-      ctx.globalAlpha = baseAlpha;
+      ctx.globalAlpha = finalAlpha;
 
-      if (!isFading) {
-        // ── Nebula glow: outer large layer ──
-        const glowPhase = Math.sin(t * 0.0025 + we.x * 0.015 + we.y * 0.01);
-        const gA        = 0.11 + glowPhase * 0.045;
-        const grd1      = ctx.createRadialGradient(we.x, we.y, 0, we.x, we.y, nr * 7);
-        grd1.addColorStop(0,   hexRgba(fc, gA * 1.9));
-        grd1.addColorStop(0.4, hexRgba(fc, gA));
-        grd1.addColorStop(1,   hexRgba(fc, 0));
-        ctx.fillStyle = grd1;
-        ctx.beginPath(); ctx.arc(we.x, we.y, nr * 7, 0, Math.PI * 2); ctx.fill();
-        // ── Nebula glow: inner tighter layer ──
-        const grd2 = ctx.createRadialGradient(we.x, we.y, 0, we.x, we.y, nr * 3);
-        grd2.addColorStop(0,   hexRgba(fc, 0.52));
-        grd2.addColorStop(0.5, hexRgba(fc, 0.18));
-        grd2.addColorStop(1,   hexRgba(fc, 0));
-        ctx.fillStyle = grd2;
-        ctx.beginPath(); ctx.arc(we.x, we.y, nr * 3, 0, Math.PI * 2); ctx.fill();
-      } else {
-        // Dim haze when fading
-        const grd = ctx.createRadialGradient(we.x, we.y, 0, we.x, we.y, nr * 3);
-        grd.addColorStop(0, 'rgba(90,90,90,0.22)');
-        grd.addColorStop(1, 'rgba(90,90,90,0)');
-        ctx.fillStyle = grd;
-        ctx.beginPath(); ctx.arc(we.x, we.y, nr * 3, 0, Math.PI * 2); ctx.fill();
-      }
+      // ── Nebula glow ──
+      const gP  = Math.sin(t * 0.0025 + wx * 0.015 + wy * 0.01);
+      const gA  = isLit ? (0.22 + gP * 0.08) : (0.45 + gP * 0.18);
+      const grd1 = ctx.createRadialGradient(wx, wy, 0, wx, wy, nr * 7);
+      grd1.addColorStop(0,   hexRgba(fc, gA * 1.6));
+      grd1.addColorStop(0.4, hexRgba(fc, gA * 0.55));
+      grd1.addColorStop(1,   hexRgba(fc, 0));
+      ctx.fillStyle = grd1;
+      ctx.beginPath(); ctx.arc(wx, wy, nr * 7, 0, Math.PI * 2); ctx.fill();
 
-      // ── Outer pulse ring ──
-      const pulsePhase = Math.sin(t * 0.004 + we.y * 0.022);
-      const pulseR     = nr + 3 + pulsePhase * 2.5;
-      const pulseA     = isFading ? 0.18 : (0.38 + pulsePhase * 0.18);
-      ctx.strokeStyle  = isFading ? 'rgba(110,110,110,0.2)' : hexRgba(fc, pulseA);
-      ctx.lineWidth    = isFading ? 0.5 : 1;
-      ctx.shadowColor  = isFading ? 'rgba(70,70,70,0.3)'    : hexRgba(fc, 0.45);
-      ctx.shadowBlur   = isFading ? 2 : 8;
-      ctx.beginPath(); ctx.arc(we.x, we.y, pulseR, 0, Math.PI * 2); ctx.stroke();
-      ctx.shadowBlur   = 0;
+      const grd2 = ctx.createRadialGradient(wx, wy, 0, wx, wy, nr * 3);
+      grd2.addColorStop(0,   hexRgba(fc, isLit ? 0.65 : 0.55));
+      grd2.addColorStop(0.5, hexRgba(fc, isLit ? 0.22 : 0.18));
+      grd2.addColorStop(1,   hexRgba(fc, 0));
+      ctx.fillStyle = grd2;
+      ctx.beginPath(); ctx.arc(wx, wy, nr * 3, 0, Math.PI * 2); ctx.fill();
 
-      // ── Star body ──
-      ctx.fillStyle   = isFading ? 'rgba(95,95,95,0.6)'    : hexRgba(fc, 0.88);
-      ctx.shadowColor = isFading ? 'rgba(70,70,70,0.4)'    : hexRgba(fc, 0.9);
-      ctx.shadowBlur  = isFading ? 4 : 16;
-      ctx.beginPath(); ctx.arc(we.x, we.y, nr, 0, Math.PI * 2); ctx.fill();
-
-      // ── Bright white star core ──
-      ctx.shadowBlur  = isFading ? 0 : 7;
-      ctx.shadowColor = 'rgba(255,255,255,0.8)';
-      ctx.fillStyle   = isFading ? 'rgba(170,170,170,0.35)' : 'rgba(255,255,255,0.93)';
-      ctx.beginPath(); ctx.arc(we.x, we.y, nr * 0.27, 0, Math.PI * 2); ctx.fill();
-      ctx.shadowBlur  = 0;
-
-      // ── 4-point sparkle rays (only when not fading) ──
-      if (!isFading) {
-        const rayLen    = nr * 2.0 + Math.sin(t * 0.003 + we.x * 0.012) * nr * 0.45;
-        ctx.strokeStyle = hexRgba(fc, 0.52);
-        ctx.lineWidth   = 0.65;
-        ctx.shadowColor = hexRgba(fc, 0.55);
-        ctx.shadowBlur  = 4;
-        for (let i = 0; i < 4; i++) {
-          const ang = (i / 4) * Math.PI * 2;
-          ctx.beginPath();
-          ctx.moveTo(we.x + Math.cos(ang) * nr * 0.6, we.y + Math.sin(ang) * nr * 0.6);
-          ctx.lineTo(we.x + Math.cos(ang) * rayLen,   we.y + Math.sin(ang) * rayLen);
-          ctx.stroke();
-        }
+      // ── Pulse ring (only when fully lit) ──
+      if (isLit) {
+        const pR = nr + 3 + Math.sin(t * 0.004 + wy * 0.022) * 2.5;
+        const pA = 0.38 + Math.sin(t * 0.004 + wy * 0.022) * 0.18;
+        ctx.strokeStyle = hexRgba(fc, pA);
+        ctx.lineWidth   = 1;
+        ctx.shadowColor = hexRgba(fc, 0.45);
+        ctx.shadowBlur  = 8;
+        ctx.beginPath(); ctx.arc(wx, wy, pR, 0, Math.PI * 2); ctx.stroke();
         ctx.shadowBlur = 0;
       }
 
+      // ── Star body ──
+      ctx.fillStyle   = hexRgba(fc, 0.88);
+      ctx.shadowColor = hexRgba(fc, 0.85);
+      ctx.shadowBlur  = isLit ? 16 : 5;
+      ctx.beginPath(); ctx.arc(wx, wy, nr, 0, Math.PI * 2); ctx.fill();
+
+      // ── White star core ──
+      ctx.fillStyle   = 'rgba(255,255,255,0.93)';
+      ctx.shadowColor = 'rgba(255,255,255,0.8)';
+      ctx.shadowBlur  = isLit ? 7 : 2;
+      ctx.beginPath(); ctx.arc(wx, wy, nr * 0.27, 0, Math.PI * 2); ctx.fill();
+      ctx.shadowBlur = 0;
+
+      // ── Sparkle rays ──
+      const rayLen    = nr * 2.0 + Math.sin(t * 0.003 + wx * 0.012) * nr * 0.45;
+      ctx.strokeStyle = hexRgba(fc, isLit ? 0.65 : 0.38);
+      ctx.lineWidth   = isLit ? 0.8 : 0.5;
+      ctx.shadowColor = hexRgba(fc, isLit ? 0.6 : 0.25);
+      ctx.shadowBlur  = isLit ? 5 : 2;
+      for (let i = 0; i < 4; i++) {
+        const ang = (i / 4) * Math.PI * 2;
+        ctx.beginPath();
+        ctx.moveTo(wx + Math.cos(ang) * nr * 0.6, wy + Math.sin(ang) * nr * 0.6);
+        ctx.lineTo(wx + Math.cos(ang) * rayLen,   wy + Math.sin(ang) * rayLen);
+        ctx.stroke();
+      }
+      ctx.shadowBlur = 0;
+
       ctx.restore();
 
-      // ── Label: only at scale > 0.7 ──
-      if (sc > 0.7) {
+      // ── Label: only at scale > 0.7 and when lit or no selection ──
+      if (sc > 0.7 && (!sel || isLit)) {
         ctx.save();
-        ctx.globalAlpha  = baseAlpha * (isFading ? 0.6 : 0.88);
+        ctx.globalAlpha  = finalAlpha * 0.88;
         ctx.font         = '7px monospace';
-        ctx.fillStyle    = isFading ? 'rgba(125,125,125,0.8)' : hexRgba(fc, 0.95);
+        ctx.fillStyle    = hexRgba(fc, 0.95);
         ctx.textAlign    = 'center';
         ctx.textBaseline = 'top';
-        ctx.shadowColor  = 'rgba(0,0,0,0.85)';
+        ctx.shadowColor  = 'rgba(0,0,0,0.88)';
         ctx.shadowBlur   = 3;
-        ctx.fillText((we.eventType || 'EVENT').toUpperCase().slice(0, 12), we.x, we.y + nr + 5);
+        ctx.fillText((we.eventType || 'EVENT').toUpperCase().slice(0, 12), wx, wy + nr + 5);
         ctx.restore();
       }
     }
@@ -2850,14 +2899,16 @@ class Starmap {
         }
       }
 
-      // ── World Event hit test ──
+      // ── World Event hit test (using assigned hex vertex positions) ──
       const WE_HIT_W = 20 / this.cam.scale;
       for (const we of this.worldEvents) {
-        if (Math.hypot(wx - we.x, wy - we.y) < WE_HIT_W) {
+        const hpos = this._eventHexPos.get(we.id);
+        if (!hpos) continue;
+        if (Math.hypot(wx - hpos.x, wy - hpos.y) < WE_HIT_W) {
           this._hideWEPopup();
           this._selectedWorldEvent = we;
           const cr = cv.getBoundingClientRect();
-          this._showWEPopup(we, cr.left + we.x * this.cam.scale + this.cam.panX, cr.top + we.y * this.cam.scale + this.cam.panY, false);
+          this._showWEPopup(we, cr.left + hpos.x * this.cam.scale + this.cam.panX, cr.top + hpos.y * this.cam.scale + this.cam.panY, false);
           return;
         }
       }
