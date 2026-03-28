@@ -162,7 +162,9 @@ class Starmap {
     this._selectedWorldEvent  = null;   // currently clicked event (for popup)
     this._wePopupEl           = this._createWEPopup();
     this._bgHexVerts  = null;           // lazily computed from background grid math
-    this._eventHexPos = new Map();      // event.id → {x, y} in world space
+    this._eventHexPos = new Map();      // event.id → {x, y, angle, color} in world space
+    this._selectedAgentId             = null;
+    this._selectedAgentConnectedEvents = new Set();
 
     // Dormant fade-out: nodes that are fading away because owner went offline
     // agentId → { x, y, t, agent }
@@ -1485,16 +1487,23 @@ class Starmap {
     };
 
     const pos = tryFind(true, 80) || tryFind(false, 80) || tryFind(false, 40) || { x: we.x || 0, y: we.y || 0 };
-    this._eventHexPos.set(we.id, { x: pos.x, y: pos.y });
+    // Stable angle/color fallback derived from id when server fields are absent
+    const idHash = we.id.split('').reduce((a, c) => (a * 31 + c.charCodeAt(0)) & 0xffffff, 0);
+    const angle  = (we.meteorAngle !== undefined && we.meteorAngle !== null)
+                    ? we.meteorAngle
+                    : (idHash % 628) / 100;
+    const color  = (we.color && we.color.length === 7)
+                    ? we.color
+                    : '#' + idHash.toString(16).padStart(6, '0');
+    this._eventHexPos.set(we.id, { x: pos.x, y: pos.y, angle, color });
   }
 
   _drawWorldEvents(ctx, t) {
-    const sc  = this.cam.scale;
-    const now = Date.now();
-    // Use only click-selected agent for opacity rules (not hover)
-    const sel = this.highlightedAgent;
+    const sc   = this.cam.scale;
+    const now  = Date.now();
+    const sel  = this._selectedAgentId;
 
-    // Assign hex vertices + crowding cull (max 3 per 200px cell, max 25 total)
+    // ── Assign hex vertices + crowding cull ──
     const visible = [];
     const cellCnt = new Map();
     for (const we of this.worldEvents) {
@@ -1507,7 +1516,7 @@ class Starmap {
       if (visible.length >= 25) break;
     }
 
-    // Build set of event IDs connected to selected agent
+    // ── Build connected IDs set ──
     const connectedIds = new Set();
     if (sel) {
       for (const { we } of visible) {
@@ -1517,12 +1526,10 @@ class Starmap {
       }
     }
 
-    // ── Pending proposals: tiny dim indicator at background hex vertex ──
+    // ── Pending proposals: faint ring at nearest hex vertex ──
     for (const p of this.pendingProposals) {
-      // Pick a stable position near the proposer's vicinity using their node coords
       const pnd = this.nodes.get(p.proposedBy);
       if (!pnd) continue;
-      // Find nearest hex vertex to proposer
       const verts = this._getBgHexVerts();
       let bestV = null, bestD = Infinity;
       for (const v of verts) {
@@ -1530,119 +1537,153 @@ class Starmap {
         if (d < bestD && d > 30) { bestD = d; bestV = v; }
       }
       if (!bestV) continue;
-      const pulse = 0.15 + Math.sin(t * 0.003 + pnd.x) * 0.08;
+      const pulse = 0.12 + Math.sin(t * 0.003 + pnd.x) * 0.06;
       ctx.save();
       ctx.globalAlpha = pulse;
-      ctx.strokeStyle = 'rgba(140,160,205,0.6)';
-      ctx.lineWidth   = 0.8;
+      ctx.strokeStyle = 'rgba(140,160,205,0.55)';
+      ctx.lineWidth   = 0.7;
       ctx.setLineDash([2, 3]);
-      ctx.beginPath(); ctx.arc(bestV.x, bestV.y, 7, 0, Math.PI * 2); ctx.stroke();
+      ctx.beginPath(); ctx.arc(bestV.x, bestV.y, 6, 0, Math.PI * 2); ctx.stroke();
       ctx.setLineDash([]);
-      ctx.fillStyle   = 'rgba(160,180,225,0.7)';
-      ctx.beginPath(); ctx.arc(bestV.x, bestV.y, 2, 0, Math.PI * 2); ctx.fill();
+      ctx.fillStyle   = 'rgba(160,180,225,0.65)';
+      ctx.beginPath(); ctx.arc(bestV.x, bestV.y, 1.8, 0, Math.PI * 2); ctx.fill();
       ctx.restore();
     }
 
-    // ── Stellar hex nodes ──
-    for (const { we, pos } of visible) {
-      const wx = pos.x, wy = pos.y;
-      const fc = we.color || '#8888ff';
-      const isFading = we.fading;
-
-      // Opacity: 20% default, 100% if connected to selected, 10% if dimmed
-      let opacity;
-      if (!sel) {
-        opacity = 0.20;
-      } else if (connectedIds.has(we.id)) {
-        opacity = 1.0;
-      } else {
-        opacity = 0.10;
+    // ── Curved connection lines (drawn first so agents render on top) ──
+    if (sel) {
+      const agNd = this.nodes.get(sel);
+      if (agNd) {
+        for (const { we, pos } of visible) {
+          if (!connectedIds.has(we.id)) continue;
+          const wx = pos.x, wy = pos.y, fc = pos.color;
+          const agX = agNd.x, agY = agNd.y;
+          const midX = (agX + wx) / 2 + Math.sin(we.createdAt) * 30;
+          const midY = (agY + wy) / 2 + Math.cos(we.createdAt) * 30;
+          const lg = ctx.createLinearGradient(agX, agY, wx, wy);
+          lg.addColorStop(0,   fc + '00');
+          lg.addColorStop(0.3, fc + '44');
+          lg.addColorStop(0.5, fc + '88');
+          lg.addColorStop(0.7, fc + '44');
+          lg.addColorStop(1,   fc + '00');
+          ctx.save();
+          ctx.setLineDash([3, 8]);
+          ctx.beginPath();
+          ctx.moveTo(agX, agY);
+          ctx.quadraticCurveTo(midX, midY, wx, wy);
+          ctx.strokeStyle = lg;
+          ctx.lineWidth   = 0.8;
+          ctx.stroke();
+          ctx.setLineDash([]);
+          ctx.restore();
+        }
       }
+    }
 
-      // Age mult: full for 90 min, fades to 0.3 over the next 90 min
+    // ── Meteor nodes ──
+    for (const { we, pos } of visible) {
+      const wx    = pos.x, wy = pos.y;
+      const fc    = pos.color;
+      const angle = pos.angle;
+
+      // Age multiplier
       const ageMs  = we.createdAt ? now - we.createdAt : 0;
       const FADE_S = 5400000, FADE_E = 10800000;
       let ageMult  = 1.0;
       if (ageMs > FADE_S) ageMult = Math.max(0.3, 1 - (ageMs - FADE_S) / (FADE_E - FADE_S) * 0.7);
-      if (isFading) ageMult *= 0.35;
+      if (we.fading) ageMult *= 0.35;
 
-      const finalAlpha = opacity * ageMult;
-      const isLit      = sel && connectedIds.has(we.id);
-      const nr         = 7 + Math.sin(t * 0.0032 + wx * 0.022) * 2;
+      // Opacity rules
+      let opacity;
+      if (!sel)                          opacity = 0.25;
+      else if (connectedIds.has(we.id))  opacity = 1.0;
+      else                               opacity = 0.06;
+      opacity *= ageMult;
 
+      const dnow = now;
+
+      // ── A. Main meteor tail ──
+      const tailLen  = (25 + Math.sin(dnow * 0.001 + we.createdAt) * 5) * Math.min(sc, 1.5);
+      const tailX    = wx - Math.cos(angle) * tailLen;
+      const tailY    = wy - Math.sin(angle) * tailLen;
+      const tGrad    = ctx.createLinearGradient(wx, wy, tailX, tailY);
+      const _h8  = Math.round(0.8 * opacity * 255).toString(16).padStart(2, '0');
+      const _h3  = Math.round(0.3 * opacity * 255).toString(16).padStart(2, '0');
+      tGrad.addColorStop(0,   fc + _h8);
+      tGrad.addColorStop(0.4, fc + _h3);
+      tGrad.addColorStop(1,   fc + '00');
       ctx.save();
-      ctx.globalAlpha = finalAlpha;
-
-      // ── Nebula glow ──
-      const gP  = Math.sin(t * 0.0025 + wx * 0.015 + wy * 0.01);
-      const gA  = isLit ? (0.22 + gP * 0.08) : (0.45 + gP * 0.18);
-      const grd1 = ctx.createRadialGradient(wx, wy, 0, wx, wy, nr * 7);
-      grd1.addColorStop(0,   hexRgba(fc, gA * 1.6));
-      grd1.addColorStop(0.4, hexRgba(fc, gA * 0.55));
-      grd1.addColorStop(1,   hexRgba(fc, 0));
-      ctx.fillStyle = grd1;
-      ctx.beginPath(); ctx.arc(wx, wy, nr * 7, 0, Math.PI * 2); ctx.fill();
-
-      const grd2 = ctx.createRadialGradient(wx, wy, 0, wx, wy, nr * 3);
-      grd2.addColorStop(0,   hexRgba(fc, isLit ? 0.65 : 0.55));
-      grd2.addColorStop(0.5, hexRgba(fc, isLit ? 0.22 : 0.18));
-      grd2.addColorStop(1,   hexRgba(fc, 0));
-      ctx.fillStyle = grd2;
-      ctx.beginPath(); ctx.arc(wx, wy, nr * 3, 0, Math.PI * 2); ctx.fill();
-
-      // ── Pulse ring (only when fully lit) ──
-      if (isLit) {
-        const pR = nr + 3 + Math.sin(t * 0.004 + wy * 0.022) * 2.5;
-        const pA = 0.38 + Math.sin(t * 0.004 + wy * 0.022) * 0.18;
-        ctx.strokeStyle = hexRgba(fc, pA);
-        ctx.lineWidth   = 1;
-        ctx.shadowColor = hexRgba(fc, 0.45);
-        ctx.shadowBlur  = 8;
-        ctx.beginPath(); ctx.arc(wx, wy, pR, 0, Math.PI * 2); ctx.stroke();
-        ctx.shadowBlur = 0;
-      }
-
-      // ── Star body ──
-      ctx.fillStyle   = hexRgba(fc, 0.88);
-      ctx.shadowColor = hexRgba(fc, 0.85);
-      ctx.shadowBlur  = isLit ? 16 : 5;
-      ctx.beginPath(); ctx.arc(wx, wy, nr, 0, Math.PI * 2); ctx.fill();
-
-      // ── White star core ──
-      ctx.fillStyle   = 'rgba(255,255,255,0.93)';
-      ctx.shadowColor = 'rgba(255,255,255,0.8)';
-      ctx.shadowBlur  = isLit ? 7 : 2;
-      ctx.beginPath(); ctx.arc(wx, wy, nr * 0.27, 0, Math.PI * 2); ctx.fill();
-      ctx.shadowBlur = 0;
-
-      // ── Sparkle rays ──
-      const rayLen    = nr * 2.0 + Math.sin(t * 0.003 + wx * 0.012) * nr * 0.45;
-      ctx.strokeStyle = hexRgba(fc, isLit ? 0.65 : 0.38);
-      ctx.lineWidth   = isLit ? 0.8 : 0.5;
-      ctx.shadowColor = hexRgba(fc, isLit ? 0.6 : 0.25);
-      ctx.shadowBlur  = isLit ? 5 : 2;
-      for (let i = 0; i < 4; i++) {
-        const ang = (i / 4) * Math.PI * 2;
-        ctx.beginPath();
-        ctx.moveTo(wx + Math.cos(ang) * nr * 0.6, wy + Math.sin(ang) * nr * 0.6);
-        ctx.lineTo(wx + Math.cos(ang) * rayLen,   wy + Math.sin(ang) * rayLen);
-        ctx.stroke();
-      }
-      ctx.shadowBlur = 0;
-
+      ctx.beginPath();
+      ctx.moveTo(wx, wy);
+      ctx.lineTo(tailX, tailY);
+      ctx.strokeStyle = tGrad;
+      ctx.lineWidth   = Math.max(1, 2.5 * sc);
+      ctx.lineCap     = 'round';
+      ctx.stroke();
       ctx.restore();
 
-      // ── Label: only at scale > 0.7 and when lit or no selection ──
-      if (sc > 0.7 && (!sel || isLit)) {
+      // ── B. Secondary smaller tail ──
+      const tail2X   = wx - Math.cos(angle + 0.15) * tailLen * 0.6;
+      const tail2Y   = wy - Math.sin(angle + 0.15) * tailLen * 0.6;
+      const t2Grad   = ctx.createLinearGradient(wx, wy, tail2X, tail2Y);
+      const _h4  = Math.round(0.4 * opacity * 255).toString(16).padStart(2, '0');
+      t2Grad.addColorStop(0, '#ffffff' + _h4);
+      t2Grad.addColorStop(1, '#ffffff00');
+      ctx.save();
+      ctx.beginPath();
+      ctx.moveTo(wx, wy);
+      ctx.lineTo(tail2X, tail2Y);
+      ctx.strokeStyle = t2Grad;
+      ctx.lineWidth   = Math.max(0.5, 1 * sc);
+      ctx.lineCap     = 'round';
+      ctx.stroke();
+      ctx.restore();
+
+      // ── C. Glowing head ──
+      const headR    = Math.max(2, 3.5 * sc);
+      const hGrad    = ctx.createRadialGradient(wx, wy, 0, wx, wy, headR * 3);
+      const _hFull   = Math.round(opacity * 255).toString(16).padStart(2, '0');
+      const _h9      = Math.round(0.9 * opacity * 255).toString(16).padStart(2, '0');
+      hGrad.addColorStop(0,   '#ffffff' + _hFull);
+      hGrad.addColorStop(0.3, fc + _h9);
+      hGrad.addColorStop(0.7, fc + _h3);
+      hGrad.addColorStop(1,   fc + '00');
+      ctx.save();
+      ctx.shadowBlur  = 12 * opacity;
+      ctx.shadowColor = fc;
+      ctx.beginPath();
+      ctx.arc(wx, wy, headR * 3, 0, Math.PI * 2);
+      ctx.fillStyle = hGrad;
+      ctx.fill();
+      ctx.beginPath();
+      ctx.arc(wx, wy, headR * 0.6, 0, Math.PI * 2);
+      ctx.fillStyle = '#ffffff' + _hFull;
+      ctx.fill();
+      ctx.restore();
+
+      // ── D. Sparkle particles ──
+      for (let i = 0; i < 4; i++) {
+        const sAng  = dnow * 0.001 + i * Math.PI / 2 + (we.createdAt || 0);
+        const sDist = (4 + Math.sin(dnow * 0.002 + i) * 2) * sc;
+        const sx = wx + Math.cos(sAng) * sDist;
+        const sy = wy + Math.sin(sAng) * sDist;
+        const _h6 = Math.round(0.6 * opacity * 255).toString(16).padStart(2, '0');
+        ctx.beginPath();
+        ctx.arc(sx, sy, Math.max(0.5, 0.8 * sc), 0, Math.PI * 2);
+        ctx.fillStyle = '#ffffff' + _h6;
+        ctx.fill();
+      }
+
+      // ── E. Label ──
+      if (sc > 0.6 && opacity > 0.15) {
+        const _hLbl = Math.round(opacity * 0.8 * 255).toString(16).padStart(2, '0');
         ctx.save();
-        ctx.globalAlpha  = finalAlpha * 0.88;
-        ctx.font         = '7px monospace';
-        ctx.fillStyle    = hexRgba(fc, 0.95);
-        ctx.textAlign    = 'center';
-        ctx.textBaseline = 'top';
-        ctx.shadowColor  = 'rgba(0,0,0,0.88)';
-        ctx.shadowBlur   = 3;
-        ctx.fillText((we.eventType || 'EVENT').toUpperCase().slice(0, 12), wx, wy + nr + 5);
+        ctx.font        = `${Math.round(7 * sc)}px monospace`;
+        ctx.fillStyle   = fc + _hLbl;
+        ctx.textAlign   = 'center';
+        ctx.shadowBlur  = 4;
+        ctx.shadowColor = fc;
+        ctx.fillText(we.eventName || (we.eventType || 'event').toUpperCase(), wx, wy + 20 * sc);
         ctx.restore();
       }
     }
@@ -2958,9 +2999,13 @@ class Starmap {
           }
         }
         const newHl = this.highlightAgent(hitId);
+        this._selectedAgentId             = newHl;
+        this._selectedAgentConnectedEvents = new Set();
         if (this.onAgentClick) this.onAgentClick(newHl);
       } else {
-        // Clicked empty space — hide ALL objects
+        // Clicked empty space — hide ALL objects, clear selection
+        this._selectedAgentId             = null;
+        this._selectedAgentConnectedEvents = new Set();
         this._hideWEPopup();
         if (this._openedWObj) {
           this._openedWObj = null;
