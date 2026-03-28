@@ -608,7 +608,7 @@ class Simulation {
       return;
     }
     // Skip obvious non-events
-    if (/create item|attack|kill|steal|equip\b|use the\b/.test(speechText.toLowerCase())) {
+    if (/^(create item|attack|i attack|i kill)/.test(speechText.toLowerCase().trim())) {
       console.log('[WE-SKIP-FILTER]', agent.name);
       return;
     }
@@ -695,10 +695,12 @@ If no: {"significant":false}`;
 
   // ── Per-agent independent timer system ────────────────────────────────────────
 
-  /** Returns a fresh random decision interval between 5 and 15 minutes.
-   *  Called after EVERY action so no two agents sync up. */
+  /** Returns a fresh random decision interval, scaled by active agent count. */
   _getDecisionInterval() {
-    return AGENT_DECISION_MIN_MS + Math.floor(Math.random() * (AGENT_DECISION_MAX_MS - AGENT_DECISION_MIN_MS));
+    const activeCount = this.agents.filter(a => a.alive && !a.dormant).length;
+    if (activeCount <= 3) return 180000 + Math.floor(Math.random() * 300000);
+    if (activeCount <= 6) return 300000 + Math.floor(Math.random() * 420000);
+    return 600000 + Math.floor(Math.random() * 1200000);
   }
 
   /** Start an independent 5-15 min LLM timer for an agent. One timer per agent, never shared. */
