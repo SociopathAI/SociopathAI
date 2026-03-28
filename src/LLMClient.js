@@ -9,9 +9,9 @@ const VALID_ACTIONS = new Set([
 const MODELS = {
   Anthropic: 'claude-haiku-4-5-20251001',
   OpenAI:    'gpt-4o-mini',
-  Google:    'gemini-1.5-flash',
-  Groq:      'llama-3.1-8b-instant',
-  Llama:     'llama-3.1-8b-instant',   // via Groq endpoint
+  Google:    'gemini-2.0-flash',
+  Groq:      'gemini-2.0-flash',   // redirected to Gemini via ADMIN_GEMINI_KEY
+  Llama:     'gemini-2.0-flash',   // redirected to Gemini via ADMIN_GEMINI_KEY
   Grok:      'grok-3-mini',
   Mistral:   'mistral-small-latest',
   Other:     'gpt-4o-mini',
@@ -38,8 +38,12 @@ class LLMClient {
       let text;
       if (this.aiSystem === 'Anthropic') {
         text = await this._anthropic(systemPrompt, userPrompt, timeoutMs);
-      } else if (this.aiSystem === 'Google') {
-        text = await this._google(systemPrompt, userPrompt, timeoutMs);
+      } else if (this.aiSystem === 'Google' || this.aiSystem === 'Groq' || this.aiSystem === 'Llama') {
+        // Groq and Llama redirect to Gemini via ADMIN_GEMINI_KEY
+        const geminiKey = (this.aiSystem === 'Groq' || this.aiSystem === 'Llama')
+          ? process.env.ADMIN_GEMINI_KEY
+          : this.apiKey;
+        text = await this._google(systemPrompt, userPrompt, timeoutMs, geminiKey);
       } else {
         const url   = ENDPOINTS[this.aiSystem] || ENDPOINTS.Other;
         const model = MODELS[this.aiSystem]    || MODELS.Other;
@@ -114,11 +118,12 @@ class LLMClient {
 
   // ── Google Gemini ──────────────────────────────────────────────────────────
 
-  async _google(systemPrompt, userPrompt, timeoutMs) {
+  async _google(systemPrompt, userPrompt, timeoutMs, keyOverride) {
     const ctl = new AbortController();
     const t   = setTimeout(() => ctl.abort(), timeoutMs);
     try {
-      const url = `https://generativelanguage.googleapis.com/v1beta/models/${MODELS.Google}:generateContent?key=${this.apiKey}`;
+      const key = keyOverride || this.apiKey;
+      const url = `https://generativelanguage.googleapis.com/v1beta/models/${MODELS.Google}:generateContent?key=${key}`;
       const res = await fetch(url, {
         method:  'POST',
         signal:  ctl.signal,

@@ -1814,12 +1814,12 @@ async function resolveProvider(apiKey, aiSystem, agentName) {
 }
 
 
-// ─── Admin LLM call: neutral judge via ADMIN_GROQ_KEY, bypasses all agent queues ──
+// ─── Admin LLM call: neutral judge via ADMIN_GEMINI_KEY, bypasses all agent queues ──
 
 async function callAsAdmin(system, user, maxTokens = 200) {
-  const adminKey = process.env.ADMIN_GROQ_KEY;
+  const adminKey = process.env.ADMIN_GEMINI_KEY;
   if (!adminKey) return null;
-  const profile = { ...PROVIDER_PROFILES['Groq'], name: 'Groq', models: ['llama-3.3-70b-versatile'] };
+  const profile = { ...PROVIDER_PROFILES['Gemini'], name: 'Gemini', models: ['gemini-2.0-flash'] };
   return _directCall(adminKey, profile, 'admin', system, user, maxTokens, 30000);
 }
 
