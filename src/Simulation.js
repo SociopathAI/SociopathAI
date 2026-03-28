@@ -582,7 +582,7 @@ class Simulation {
       if (!keywords.some(k => lower.includes(k))) continue;
       p.participants.push(agent.id);
       console.log(`[WORLD EVENT] ${agent.name} joined proposal "${p.eventName}" (${p.participants.length} participants)`);
-      if (p.participants.length >= 2) {
+      if (p.participants.length >= 1) {
         this._convertProposalToEvent(p);
         this.pendingProposals.splice(i, 1);
       }
@@ -603,53 +603,58 @@ class Simulation {
     const now       = Date.now();
     const THIRTY_M  = 1800000;
     // Skip if this agent already has a pending proposal in last 30 min
-    if (this.pendingProposals.some(p => p.proposedBy === agent.id && now - p.proposedAt < THIRTY_M)) return;
+    if (this.pendingProposals.some(p => p.proposedBy === agent.id && now - p.proposedAt < THIRTY_M)) {
+      console.log('[WE-SKIP-COOLDOWN]', agent.name);
+      return;
+    }
     // Skip obvious non-events
-    if (/create item|attack|kill|steal|equip\b|use the\b/.test(speechText.toLowerCase())) return;
+    if (/create item|attack|kill|steal|equip\b|use the\b/.test(speechText.toLowerCase())) {
+      console.log('[WE-SKIP-FILTER]', agent.name);
+      return;
+    }
 
-    const system = 'Analyze agent action. Return JSON only. Be selective — only truly significant world-building actions qualify.';
+    const system = 'Analyze agent action. Return JSON only.';
     const user   = `Agent '${agent.name}' said: '${speechText.slice(0, 150)}'
-Is this a significant world-building action? (NOT combat, NOT just talking, NOT item creation)
-World-building: establishing something lasting — a place, institution, belief system, relationship structure, economic system, cultural practice, or governing principle.
-If yes: {"significant":true,"eventName":"2-4 word name","eventType":"single word","color":"#hexcolor","effect":"one sentence","glow":true}
+
+Is this agent doing something that creates a lasting mark on their world?
+Think broadly: forming a group, establishing a belief, starting a practice,
+claiming territory, creating culture, building relationships, declaring principles,
+starting commerce, exploring, healing, teaching, celebrating, governing.
+
+Even small but intentional world-shaping actions count.
+Combat and item creation do NOT count.
+
+If yes: {"significant":true,"eventName":"2-4 word name","eventType":"one word","color":"#hexcolor","effect":"one sentence","glow":true}
 If no: {"significant":false}`;
 
-    let result = null;
-    const raw = await LLMBridge.callAsAdmin(system, user, 120);
-    if (raw) {
-      const obj = LLMBridge.extractJSON(raw);
-      if (obj && obj.significant === true && typeof obj.eventName === 'string' && obj.eventName.length > 0) {
-        result = obj;
-      }
+    console.log('[WE-ANALYZING]', agent.name, ':', speechText.slice(0, 60));
+    let raw = null;
+    try {
+      raw = await LLMBridge.callAsAdmin(system, user, 150);
+      console.log('[WE-LLM-RESULT]', agent.name, ':', raw ? raw.slice(0, 80) : 'null/failed');
+    } catch (e) {
+      console.log('[WE-LLM-ERROR]', agent.name, ':', e.message);
+      return;
     }
+    if (!raw) return;
 
-    // Keyword fallback when no admin key
-    if (!result) {
-      const wbRe = /\b(found|establish|declare.*ruler|proclaim.*king|institute|create.*church|create.*order|create.*guild|temple|shrine|tribunal|council|charter|constitution|doctrine|commandment|throne|kingdom|empire)\b/i;
-      if (wbRe.test(speechText)) {
-        const nameMatch = speechText.match(/(?:the\s+)?([A-Z][A-Za-z]+(?:\s+[A-Z][A-Za-z]+){0,2})/);
-        result = {
-          eventName: nameMatch ? nameMatch[1].slice(0, 40) : `${agent.name}'s Founding`,
-          eventType: 'institution',
-          color:     '#' + Math.floor(Math.random() * 0xffffff).toString(16).padStart(6, '0'),
-          effect:    'A new institution takes root in the world.',
-          glow:      true,
-        };
-      }
-    }
-    if (!result) return;
+    const obj = LLMBridge.extractJSON(raw);
+    console.log('[WE-PARSED]', agent.name, ':', JSON.stringify(obj));
+    if (!obj || obj.significant !== true) return;
 
-    const safeColor = /^#[0-9a-fA-F]{6}$/.test(result.color) ? result.color : '#8888ff';
+    const safeColor = /^#[0-9a-fA-F]{6}$/.test(obj.color)
+      ? obj.color
+      : '#' + Math.floor(Math.random() * 0xffffff).toString(16).padStart(6, '0');
     const id = `wp_${this._nextWEId++}`;
     const proposal = {
       id,
       proposedBy:     agent.id,
       proposedByName: agent.name,
-      eventName:      LLMBridge.sanitizeForDisplay(result.eventName).slice(0, 40),
-      eventType:      LLMBridge.sanitizeForDisplay(result.eventType || 'event').slice(0, 20),
+      eventName:      LLMBridge.sanitizeForDisplay(obj.eventName).slice(0, 40),
+      eventType:      LLMBridge.sanitizeForDisplay(obj.eventType || 'event').slice(0, 20),
       color:          safeColor,
-      effect:         LLMBridge.sanitizeForDisplay(result.effect || '').slice(0, 150),
-      glow:           !!result.glow,
+      effect:         LLMBridge.sanitizeForDisplay(obj.effect || '').slice(0, 150),
+      glow:           !!obj.glow,
       proposedAt:     now,
       participants:   [agent.id],
     };
