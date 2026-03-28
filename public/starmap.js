@@ -429,6 +429,13 @@ class Starmap {
     // Clean up cached hex positions for events that no longer exist
     { const _live = new Set(this.worldEvents.map(e => e.id));
       for (const id of this._eventHexPos.keys()) { if (!_live.has(id)) this._eventHexPos.delete(id); } }
+    // Force re-cache any entry that is missing color or meteorAngle
+    for (const we of this.worldEvents) {
+      const cached = this._eventHexPos.get(we.id);
+      if (cached && (!cached.color || cached.color.length !== 7 || cached.meteorAngle === undefined)) {
+        this._eventHexPos.delete(we.id);
+      }
+    }
 
     // Connections — guard against missing/null
     this.connections = Array.isArray(state.connections) ? state.connections : [];
@@ -1458,7 +1465,8 @@ class Starmap {
    * Falls back to relaxed constraints if needed.
    */
   _assignHexVert(we) {
-    if (this._eventHexPos.has(we.id)) return;
+    const existing = this._eventHexPos.get(we.id);
+    if (existing && existing.color && existing.color.length === 7 && existing.meteorAngle !== undefined) return;
     const verts     = this._getBgHexVerts();
     const creatorNd = this.nodes.get(we.creatorId);
     const originX   = creatorNd ? creatorNd.x : (we.x || 0);
@@ -1487,15 +1495,20 @@ class Starmap {
     };
 
     const pos = tryFind(true, 80) || tryFind(false, 80) || tryFind(false, 40) || { x: we.x || 0, y: we.y || 0 };
-    // Stable angle/color fallback derived from id when server fields are absent
-    const idHash = we.id.split('').reduce((a, c) => (a * 31 + c.charCodeAt(0)) & 0xffffff, 0);
-    const angle  = (we.meteorAngle !== undefined && we.meteorAngle !== null)
+    // Preserve existing position if already cached (only color/angle were missing)
+    const prevPos = this._eventHexPos.get(we.id);
+    const angle = (we.meteorAngle !== undefined && we.meteorAngle !== null)
                     ? we.meteorAngle
-                    : (idHash % 628) / 100;
-    const color  = (we.color && we.color.length === 7)
+                    : Math.random() * Math.PI * 2;
+    const color = (we.color && we.color.length === 7)
                     ? we.color
-                    : '#' + idHash.toString(16).padStart(6, '0');
-    this._eventHexPos.set(we.id, { x: pos.x, y: pos.y, angle, color });
+                    : '#' + Math.floor(Math.random() * 0xffffff).toString(16).padStart(6, '0');
+    this._eventHexPos.set(we.id, {
+      x: prevPos ? prevPos.x : pos.x,
+      y: prevPos ? prevPos.y : pos.y,
+      angle,
+      color,
+    });
   }
 
   _drawWorldEvents(ctx, t) {

@@ -1367,6 +1367,15 @@ If no: {"significant":false}`;
     // Restore world events + pending proposals
     this.worldEvents      = worldData.worldEvents      || [];
     this.pendingProposals = worldData.pendingProposals || [];
+    // Migrate events that predate meteorAngle/color fields
+    for (const we of this.worldEvents) {
+      if (!we.meteorAngle && we.meteorAngle !== 0) {
+        we.meteorAngle = Math.random() * Math.PI * 2;
+      }
+      if (!we.color || we.color.length !== 7) {
+        we.color = '#' + Math.floor(Math.random() * 0xffffff).toString(16).padStart(6, '0');
+      }
+    }
     if (this.worldEvents.length > 0 || this.pendingProposals.length > 0) {
       const allIds = [...this.worldEvents, ...this.pendingProposals]
         .map(e => parseInt((e.id || '').replace(/^w[ep]_/, ''), 10))
